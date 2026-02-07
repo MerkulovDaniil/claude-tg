@@ -152,6 +152,7 @@ class ClaudeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.work_dir,
+                limit=50 * 1024 * 1024,  # 50MB — tool results can be huge (images, large files)
             )
 
             async for line in self.process.stdout:
