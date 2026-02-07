@@ -136,8 +136,13 @@ class ClaudeRunner:
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--dangerously-skip-permissions",
         ]
+
+        # Use --dangerously-skip-permissions only if not root (Claude CLI blocks it for root)
+        # For root, configure permissions via ~/.claude/settings.json instead
+        import os
+        if os.getuid() != 0:
+            cmd.append("--dangerously-skip-permissions")
 
         if self.session_id:
             cmd.extend(["--resume", self.session_id])
