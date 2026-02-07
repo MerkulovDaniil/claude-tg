@@ -137,6 +137,10 @@ class ClaudeRunner:
             "--verbose",
             "--include-partial-messages",
             "--dangerously-skip-permissions",
+            "--append-system-prompt",
+            "To send files to the user, save them in the outbox/ directory "
+            "in the working directory. They will be automatically delivered "
+            "via Telegram and deleted after sending.",
         ]
 
         if self.session_id:
