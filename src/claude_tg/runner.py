@@ -152,7 +152,7 @@ class ClaudeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.work_dir,
-                limit=2 * 1024 * 1024 * 1024,  # 2GB — no practical limit on line size
+                limit=100 * 1024 * 1024,  # 100MB
             )
 
             async for line in self.process.stdout:
