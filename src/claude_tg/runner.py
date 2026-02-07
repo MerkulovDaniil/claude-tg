@@ -138,11 +138,21 @@ class ClaudeRunner:
             "--include-partial-messages",
         ]
 
-        # Use --dangerously-skip-permissions only if not root (Claude CLI blocks it for root)
-        # For root, configure permissions via ~/.claude/settings.json instead
         import os
         if os.getuid() != 0:
             cmd.append("--dangerously-skip-permissions")
+        else:
+            # Root can't use --dangerously-skip-permissions, use --allowedTools instead
+            cmd.extend([
+                "--allowedTools",
+                "Bash()", "Edit()", "MultiEdit()", "Write()", "Read()",
+                "Glob()", "Grep()", "WebFetch()", "WebSearch()",
+                "Task()", "TodoWrite()", "NotebookEdit()", "NotebookRead()",
+                "mcp__todoist", "mcp__google-calendar",
+                "mcp__garmin", "mcp__garmin-sleep",
+                "mcp__oura", "mcp__tavily",
+                "mcp__telegram", "mcp__claude-tg",
+            ])
 
         if self.session_id:
             cmd.extend(["--resume", self.session_id])
