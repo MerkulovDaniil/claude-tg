@@ -43,6 +43,7 @@ class ClaudeTelegramBot:
         self._buffer_docs: list[str] = []
         self._debounce_task: asyncio.Task | None = None
         self._debounce_timeout = 0.5
+        self._pending_context: ContextTypes.DEFAULT_TYPE | None = None
 
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
@@ -158,6 +159,11 @@ class ClaudeTelegramBot:
         await update.message.reply_text("🎤 Voice messages not supported yet.")
 
     async def _schedule_debounce(self, context: ContextTypes.DEFAULT_TYPE):
+        # While Claude is running, just buffer messages — they'll be processed after
+        if self.runner.is_running:
+            self._pending_context = context
+            return
+
         if self._debounce_task:
             self._debounce_task.cancel()
             try:
@@ -185,12 +191,6 @@ class ClaudeTelegramBot:
 
         self._check_session_timeout()
         self._touch_activity()
-
-        if self.runner.is_running:
-            await context.bot.send_message(
-                self.config.chat_id, "⚠️ Claude is busy. Use /cancel first."
-            )
-            return
 
         # Build prompt with media references
         prompt = self.media.build_prompt(text, photos, docs)
@@ -243,6 +243,11 @@ class ClaudeTelegramBot:
                 )
         finally:
             self._stream = None
+            # Process messages that arrived while Claude was running
+            if self._buffer or self._buffer_photos or self._buffer_docs:
+                ctx = self._pending_context or context
+                self._pending_context = None
+                await self._schedule_debounce(ctx)
 
     # --- App setup ---
 
