@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-tg"
-version = "0.1.4.1"
+version = "0.1.4.2"
 description = "Claude Code <-> Telegram bridge"
 readme = "README.md"
 requires-python = ">=3.11"
