@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-tg"
+version = "0.1.0"
+description = "Claude Code <-> Telegram bridge"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "python-telegram-bot>=21.0",
+]
+
+[project.scripts]
+claude-tg = "claude_tg.__main__:main"
