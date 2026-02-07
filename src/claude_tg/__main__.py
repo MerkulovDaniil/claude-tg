@@ -58,33 +58,26 @@ def main():
 
 
 def _ensure_mcp(work_dir: str):
-    """Register claude-tg MCP server in Claude Code project settings if needed."""
-    # Check both .claude/settings.json and .mcp.json
-    for config_name in (".claude/settings.json", ".mcp.json"):
-        config_file = Path(work_dir) / config_name
-        if config_file.exists():
-            try:
-                data = json.loads(config_file.read_text())
-                if "claude-tg" in data.get("mcpServers", {}):
-                    return
-            except (json.JSONDecodeError, KeyError):
-                pass
-
+    """Register claude-tg MCP server in Claude Code project settings."""
+    logger = logging.getLogger(__name__)
     try:
+        # Remove old registration (ignore if not found)
+        subprocess.run(
+            ["claude", "mcp", "remove", "claude-tg", "--scope", "project"],
+            cwd=work_dir,
+            capture_output=True,
+        )
         subprocess.run(
             ["claude", "mcp", "add", "claude-tg", "--scope", "project", "--", "claude-tg-mcp"],
             cwd=work_dir,
             capture_output=True,
             check=True,
         )
-        logging.getLogger(__name__).info("Registered claude-tg MCP server")
+        logger.info("Registered claude-tg MCP server")
     except FileNotFoundError:
-        logging.getLogger(__name__).warning("claude CLI not found, skipping MCP registration")
+        logger.warning("claude CLI not found, skipping MCP registration")
     except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode().strip()
-        if "already exists" in stderr:
-            return
-        logging.getLogger(__name__).warning(f"MCP registration failed: {stderr}")
+        logger.warning(f"MCP registration failed: {e.stderr.decode().strip()}")
 
 
 if __name__ == "__main__":
