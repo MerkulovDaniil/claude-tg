@@ -1,8 +1,11 @@
 """CLI entry point for claude-tg."""
+import json
+import subprocess
 import sys
 import argparse
 import logging
 import os
+from pathlib import Path
 
 from .config import Config
 from .bot import ClaudeTelegramBot
@@ -48,8 +51,35 @@ def main():
         )
         sys.exit(1)
 
+    _ensure_mcp(config.work_dir)
+
     bot = ClaudeTelegramBot(config)
     bot.run()
+
+
+def _ensure_mcp(work_dir: str):
+    """Register claude-tg MCP server in Claude Code project settings if needed."""
+    settings_file = Path(work_dir) / ".claude" / "settings.json"
+    if settings_file.exists():
+        try:
+            settings = json.loads(settings_file.read_text())
+            if "claude-tg" in settings.get("mcpServers", {}):
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    try:
+        subprocess.run(
+            ["claude", "mcp", "add", "claude-tg", "--scope", "project", "--", "claude-tg-mcp"],
+            cwd=work_dir,
+            capture_output=True,
+            check=True,
+        )
+        logging.getLogger(__name__).info("Registered claude-tg MCP server")
+    except FileNotFoundError:
+        logging.getLogger(__name__).warning("claude CLI not found, skipping MCP registration")
+    except subprocess.CalledProcessError as e:
+        logging.getLogger(__name__).warning(f"MCP registration failed: {e.stderr.decode().strip()}")
 
 
 if __name__ == "__main__":
