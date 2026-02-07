@@ -14,6 +14,9 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.optional-dependencies]
+voice = ["groq>=0.4"]
+
 [project.scripts]
 claude-tg = "claude_tg.__main__:main"
 claude-tg-mcp = "claude_tg.mcp_server:main"

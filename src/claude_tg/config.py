@@ -21,6 +21,7 @@ class Config:
         self.update_interval: float = float(
             os.environ.get("CLAUDE_TG_UPDATE_INTERVAL", "2.0")
         )
+        self.groq_api_key: str | None = os.environ.get("GROQ_API_KEY")
 
     def validate(self) -> list[str]:
         """Return list of validation errors. Empty = valid."""

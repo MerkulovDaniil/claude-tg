@@ -156,7 +156,18 @@ class ClaudeTelegramBot:
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        await update.message.reply_text("🎤 Voice messages not supported yet.")
+        if not self.config.groq_api_key:
+            await update.message.reply_text("🎤 Voice requires GROQ_API_KEY env var.")
+            return
+        try:
+            ogg_path = await self.media.save_voice(update.message.voice, context.bot)
+            text = await self.media.transcribe_voice(ogg_path, self.config.groq_api_key)
+            if text:
+                self._buffer.append(text)
+                await self._schedule_debounce(context)
+        except Exception as e:
+            logger.exception("Voice transcription failed")
+            await update.message.reply_text(f"🎤 Transcription error: {str(e)[:200]}")
 
     async def _schedule_debounce(self, context: ContextTypes.DEFAULT_TYPE):
         # While Claude is running, just buffer messages — they'll be processed after
