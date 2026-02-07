@@ -59,14 +59,16 @@ def main():
 
 def _ensure_mcp(work_dir: str):
     """Register claude-tg MCP server in Claude Code project settings if needed."""
-    settings_file = Path(work_dir) / ".claude" / "settings.json"
-    if settings_file.exists():
-        try:
-            settings = json.loads(settings_file.read_text())
-            if "claude-tg" in settings.get("mcpServers", {}):
-                return
-        except (json.JSONDecodeError, KeyError):
-            pass
+    # Check both .claude/settings.json and .mcp.json
+    for config_name in (".claude/settings.json", ".mcp.json"):
+        config_file = Path(work_dir) / config_name
+        if config_file.exists():
+            try:
+                data = json.loads(config_file.read_text())
+                if "claude-tg" in data.get("mcpServers", {}):
+                    return
+            except (json.JSONDecodeError, KeyError):
+                pass
 
     try:
         subprocess.run(
@@ -79,7 +81,10 @@ def _ensure_mcp(work_dir: str):
     except FileNotFoundError:
         logging.getLogger(__name__).warning("claude CLI not found, skipping MCP registration")
     except subprocess.CalledProcessError as e:
-        logging.getLogger(__name__).warning(f"MCP registration failed: {e.stderr.decode().strip()}")
+        stderr = e.stderr.decode().strip()
+        if "already exists" in stderr:
+            return
+        logging.getLogger(__name__).warning(f"MCP registration failed: {stderr}")
 
 
 if __name__ == "__main__":
