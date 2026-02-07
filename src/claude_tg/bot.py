@@ -1,4 +1,5 @@
 """Telegram bot setup, handlers, and session management."""
+import pathlib
 import time
 import asyncio
 import logging
@@ -243,11 +244,33 @@ class ClaudeTelegramBot:
                 )
         finally:
             self._stream = None
+            await self._send_outbox_files(context)
             # Process messages that arrived while Claude was running
             if self._buffer or self._buffer_photos or self._buffer_docs:
                 ctx = self._pending_context or context
                 self._pending_context = None
                 await self._schedule_debounce(ctx)
+
+    # --- Outbox ---
+
+    async def _send_outbox_files(self, context: ContextTypes.DEFAULT_TYPE):
+        """Send files from outbox/ directory to the user, then clean up."""
+        outbox = pathlib.Path(self.config.work_dir) / "outbox"
+        if not outbox.is_dir():
+            return
+        for file_path in sorted(outbox.iterdir()):
+            if not file_path.is_file():
+                continue
+            try:
+                with file_path.open("rb") as f:
+                    await context.bot.send_document(
+                        chat_id=self.config.chat_id,
+                        document=f,
+                        filename=file_path.name,
+                    )
+                file_path.unlink()
+            except Exception as e:
+                logger.warning(f"Failed to send outbox file {file_path.name}: {e}")
 
     # --- App setup ---
 
