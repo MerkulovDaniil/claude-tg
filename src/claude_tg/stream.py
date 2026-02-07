@@ -1,11 +1,14 @@
 """Telegram message streaming with rate limiting and message chaining."""
 import time
 import asyncio
+import logging
 from telegram import Message, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from .formatter import md_to_html
+
+logger = logging.getLogger(__name__)
 
 
 class MessageChain:
@@ -131,12 +134,30 @@ class TelegramStream:
         try:
             html_text = md_to_html(text)
             await msg.edit_text(html_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+            return
         except BadRequest as e:
             if "message is not modified" in str(e).lower():
                 return
-            try:
-                await msg.edit_text(text, reply_markup=reply_markup)
-            except BadRequest:
-                pass
-        except Exception:
-            pass
+            logger.warning(f"HTML edit failed: {e} (text length: {len(text)})")
+        except Exception as e:
+            logger.warning(f"HTML edit error: {e}")
+
+        # Fallback: plain text (no parse_mode)
+        try:
+            await msg.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+            return
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+            logger.warning(f"Plain text edit failed: {e}")
+        except Exception as e:
+            logger.warning(f"Plain text edit error: {e}")
+
+        # Last resort: send new message
+        try:
+            self._current_msg = await self.bot.send_message(
+                chat_id=self.chat_id, text=text[:4096], reply_markup=reply_markup,
+            )
+            logger.info("Fell back to sending new message")
+        except Exception as e:
+            logger.error(f"All message methods failed: {e}")
