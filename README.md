@@ -6,6 +6,9 @@ Claude Code CLI <-> Telegram bridge. Full terminal experience through Telegram w
 
 ```bash
 pip install claude-tg
+
+# With voice message support:
+pip install claude-tg[voice]
 ```
 
 ## Quick Start
@@ -36,7 +39,7 @@ Inline **Cancel** button is shown on every message during processing.
 
 - **Photos** — send a photo to the bot, it gets passed to Claude as a file reference
 - **Documents** — same for files (PDF, code, etc.)
-- **Voice** — not supported yet
+- **Voice** — transcribed via Groq Whisper API and sent as text to Claude (requires `GROQ_API_KEY`)
 
 Claude sees the file path and can read/analyze it with its built-in tools.
 
@@ -62,6 +65,7 @@ The MCP server (`claude-tg-mcp`) is auto-registered on first launch. No manual c
 | `CLAUDE_TG_MAX_BUDGET` | — | Max budget in USD |
 | `CLAUDE_TG_SESSION_TIMEOUT` | `3600` | Auto-reset after N seconds of inactivity |
 | `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram message update interval (seconds) |
+| `GROQ_API_KEY` | — | Groq API key for voice transcription |
 
 ## CLI Flags
 
@@ -79,6 +83,7 @@ claude-tg --work-dir /path/to/project --verbose
 - Message queuing — send messages while Claude is working, they process after
 - Session auto-reset after inactivity
 - Compact tool call display with emoji icons
+- Voice message transcription via Groq Whisper API
 - Auto-registration of MCP server in Claude Code
 
 ## Requirements
