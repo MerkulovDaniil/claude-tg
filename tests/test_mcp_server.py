@@ -36,7 +36,7 @@ class TestSendTelegramFile:
             result = asyncio.run(send_telegram_file("/nonexistent/file.txt"))
         assert "File not found" in result
 
-    def test_successful_send(self, tmp_file):
+    def test_successful_send_deletes_by_default(self, tmp_file):
         env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}
         mock_bot = MagicMock()
         mock_bot.send_document = AsyncMock()
@@ -45,7 +45,6 @@ class TestSendTelegramFile:
 
         with patch.dict(os.environ, env, clear=False), \
              patch("telegram.Bot", return_value=mock_bot) as mock_cls:
-            # Move import inside so patch applies
             result = asyncio.run(send_telegram_file(str(tmp_file), caption="test"))
 
         mock_cls.assert_called_once_with(token="tok")
@@ -55,6 +54,21 @@ class TestSendTelegramFile:
         assert call_kwargs["filename"] == "test.txt"
         assert call_kwargs["caption"] == "test"
         assert "sent to Telegram" in result
+        assert not tmp_file.exists()
+
+    def test_send_preserves_file_when_delete_after_false(self, tmp_file):
+        env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}
+        mock_bot = MagicMock()
+        mock_bot.send_document = AsyncMock()
+        mock_bot.__aenter__ = AsyncMock(return_value=mock_bot)
+        mock_bot.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.dict(os.environ, env, clear=False), \
+             patch("telegram.Bot", return_value=mock_bot):
+            result = asyncio.run(send_telegram_file(str(tmp_file), delete_after=False))
+
+        assert "sent to Telegram" in result
+        assert tmp_file.exists()
 
     def test_send_without_caption(self, tmp_file):
         env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}

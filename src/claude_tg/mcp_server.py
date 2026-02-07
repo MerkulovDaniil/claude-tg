@@ -8,8 +8,8 @@ mcp = FastMCP("claude-tg")
 
 
 @mcp.tool()
-async def send_telegram_file(file_path: str, caption: str = "") -> str:
-    """Send a file to the user via Telegram. Use when the user asks to receive or download a file."""
+async def send_telegram_file(file_path: str, caption: str = "", delete_after: bool = True) -> str:
+    """Send a file to the user via Telegram. Use when the user asks to receive or download a file. Set delete_after=False when sending existing project files that should be preserved."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -31,6 +31,8 @@ async def send_telegram_file(file_path: str, caption: str = "") -> str:
                 filename=path.name,
                 caption=caption or None,
             )
+    if delete_after:
+        path.unlink(missing_ok=True)
     return f"File {path.name} sent to Telegram"
 
 
