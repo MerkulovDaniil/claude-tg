@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from claude_tg.mcp_server import send_telegram_file, get_outbox_path, OUTBOX
+from claude_tg.mcp_server import send_telegram_file
 
 
 @pytest.fixture
@@ -13,15 +13,6 @@ def tmp_file(tmp_path):
     f = tmp_path / "test.txt"
     f.write_text("hello world")
     return f
-
-
-@pytest.fixture
-def outbox_file():
-    OUTBOX.mkdir(parents=True, exist_ok=True)
-    f = OUTBOX / "temp.txt"
-    f.write_text("temporary")
-    yield f
-    f.unlink(missing_ok=True)
 
 
 def _mock_bot():
@@ -68,8 +59,8 @@ class TestSendTelegramFile:
         assert call_kwargs["caption"] == "test"
         assert "sent to Telegram" in result
 
-    def test_project_file_preserved(self, tmp_file):
-        """Files outside outbox are never deleted."""
+    def test_temp_file_deleted_by_default(self, tmp_file):
+        """temp_file=True (default) deletes file after sending."""
         env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}
         mock_bot = _mock_bot()
 
@@ -77,19 +68,18 @@ class TestSendTelegramFile:
              patch("telegram.Bot", return_value=mock_bot):
             asyncio.run(send_telegram_file(str(tmp_file)))
 
-        assert tmp_file.exists()
+        assert not tmp_file.exists()
 
-    def test_outbox_file_deleted(self, outbox_file):
-        """Files inside outbox are auto-deleted after sending."""
+    def test_project_file_preserved(self, tmp_file):
+        """temp_file=False preserves the file."""
         env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}
         mock_bot = _mock_bot()
 
         with patch.dict(os.environ, env, clear=False), \
              patch("telegram.Bot", return_value=mock_bot):
-            result = asyncio.run(send_telegram_file(str(outbox_file)))
+            asyncio.run(send_telegram_file(str(tmp_file), temp_file=False))
 
-        assert "sent to Telegram" in result
-        assert not outbox_file.exists()
+        assert tmp_file.exists()
 
     def test_send_without_caption(self, tmp_file):
         env = {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "123"}
@@ -112,14 +102,3 @@ class TestSendTelegramFile:
              patch("telegram.Bot", return_value=mock_bot):
             with pytest.raises(Exception, match="API error"):
                 asyncio.run(send_telegram_file(str(tmp_file)))
-
-
-class TestGetOutboxPath:
-    def test_returns_outbox_path(self):
-        result = get_outbox_path()
-        assert result == str(OUTBOX)
-
-    def test_creates_directory(self):
-        OUTBOX.rmdir() if OUTBOX.exists() else None
-        get_outbox_path()
-        assert OUTBOX.is_dir()
