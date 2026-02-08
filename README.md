@@ -1,14 +1,11 @@
 # claude-tg
 
-Claude Code CLI <-> Telegram bridge. Full terminal experience through Telegram with token-level streaming.
+Claude Code CLI <-> Telegram bridge. Chat with Claude Code from your phone — full agentic experience through Telegram with token-level streaming.
 
 ## Install
 
 ```bash
 pip install claude-tg
-
-# With voice message support:
-pip install claude-tg[voice]
 ```
 
 ## Quick Start
@@ -21,7 +18,7 @@ export CLAUDE_WORK_DIR="/path/to/project"    # optional, defaults to cwd
 claude-tg
 ```
 
-On first run, the MCP server for file sending is auto-registered in Claude Code.
+On first run, the built-in MCP server for file sending is auto-registered in Claude Code.
 
 ## Commands
 
@@ -37,11 +34,9 @@ Inline **Cancel** button is shown on every message during processing.
 
 ## Media
 
-- **Photos** — send a photo to the bot, it gets passed to Claude as a file reference
+- **Photos** — sent to Claude as file references, Claude can read/analyze them
 - **Documents** — same for files (PDF, code, etc.)
-- **Voice** — transcribed via Groq Whisper API and sent as text to Claude (requires `GROQ_API_KEY`)
-
-Claude sees the file path and can read/analyze it with its built-in tools.
+- **Voice** — transcribed via Groq Whisper API and sent as text (requires `GROQ_API_KEY`)
 
 ## File Sending (MCP)
 
@@ -51,7 +46,16 @@ Claude can send files back to you via the built-in MCP server:
 - `temp_file=True` (default) — file is deleted after sending (for generated/temporary files)
 - `temp_file=False` — file is preserved (for existing project files)
 
-The MCP server (`claude-tg-mcp`) is auto-registered on first launch. No manual configuration needed.
+The MCP server (`claude-tg-mcp`) is auto-registered on launch. No manual setup needed.
+
+## Running as Root (VPS / Servers)
+
+Claude Code CLI blocks `--dangerously-skip-permissions` for root. `claude-tg` handles this automatically:
+
+- **Non-root** — uses `--dangerously-skip-permissions` as usual
+- **Root** — uses `--allowedTools` with dynamically discovered MCP servers (reads `~/.claude.json` and `.mcp.json`)
+
+All registered MCP servers and built-in tools are allowed automatically. No hardcoded server names.
 
 ## Configuration
 
@@ -67,23 +71,44 @@ The MCP server (`claude-tg-mcp`) is auto-registered on first launch. No manual c
 | `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram message update interval (seconds) |
 | `GROQ_API_KEY` | — | Groq API key for voice transcription |
 
-## CLI Flags
+## Systemd (VPS deployment)
 
-```
-claude-tg --work-dir /path/to/project --verbose
+```bash
+# Install
+uv tool install 'claude-tg[voice]'
+
+# Create service
+cat > /etc/systemd/system/claude-tg.service << 'EOF'
+[Unit]
+Description=Claude TG
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/path/to/.env
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=/root/.local/bin/claude-tg --work-dir /root
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable --now claude-tg
 ```
 
 ## Features
 
 - Token-level streaming with adaptive rate limiting
 - Automatic message chaining for long outputs (splits at ~3800 chars)
-- Photo and file uploads passed to Claude as file references
-- MCP server for sending files back to the user
+- Photo, file, and voice message support
+- Built-in MCP server for sending files back to the user
 - Inline cancel button on every message
 - Message queuing — send messages while Claude is working, they process after
 - Session auto-reset after inactivity
 - Compact tool call display with emoji icons
-- Voice message transcription via Groq Whisper API
+- Root-compatible — auto-discovers and allows all MCP tools
 - Auto-registration of MCP server in Claude Code
 
 ## Requirements
