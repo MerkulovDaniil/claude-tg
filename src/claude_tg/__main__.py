@@ -1,6 +1,5 @@
 """CLI entry point for claude-tg."""
 import json
-import subprocess
 import sys
 import argparse
 import logging
@@ -58,26 +57,21 @@ def main():
 
 
 def _ensure_mcp(work_dir: str):
-    """Register claude-tg MCP server in Claude Code project settings."""
+    """Register claude-tg MCP server in .mcp.json (no CLI dependency)."""
     logger = logging.getLogger(__name__)
+    mcp_path = Path(work_dir) / ".mcp.json"
+    entry = {"type": "stdio", "command": "claude-tg-mcp", "args": [], "env": {}}
     try:
-        # Remove old registration (ignore if not found)
-        subprocess.run(
-            ["claude", "mcp", "remove", "claude-tg", "--scope", "project"],
-            cwd=work_dir,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["claude", "mcp", "add", "claude-tg", "--scope", "project", "--", "claude-tg-mcp"],
-            cwd=work_dir,
-            capture_output=True,
-            check=True,
-        )
-        logger.info("Registered claude-tg MCP server")
-    except FileNotFoundError:
-        logger.warning("claude CLI not found, skipping MCP registration")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"MCP registration failed: {e.stderr.decode().strip()}")
+        data = json.loads(mcp_path.read_text()) if mcp_path.exists() else {}
+        servers = data.setdefault("mcpServers", {})
+        if servers.get("claude-tg") == entry:
+            logger.debug("claude-tg MCP server already registered")
+            return
+        servers["claude-tg"] = entry
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+        logger.info("Registered claude-tg MCP server in .mcp.json")
+    except Exception as e:
+        logger.warning(f"MCP registration failed: {e}")
 
 
 if __name__ == "__main__":
