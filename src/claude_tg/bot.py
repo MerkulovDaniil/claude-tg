@@ -1,4 +1,6 @@
 """Telegram bot setup, handlers, and session management."""
+import os
+import sys
 import time
 import asyncio
 import logging
@@ -109,6 +111,18 @@ class ClaudeTelegramBot:
             return
         self.runner.model = context.args[0]
         await update.message.reply_text(f"Model set to: {self.runner.model}")
+
+    async def cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if self.runner.is_running:
+            await self.runner.cancel()
+            if self._stream:
+                await self._stream.finalize(cancelled=True)
+                self._stream = None
+        await update.message.reply_text("🔄 Restarting bot...")
+        os.environ["_CLAUDE_TG_RESTARTED"] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # --- Cancel callback ---
 
@@ -264,7 +278,12 @@ class ClaudeTelegramBot:
 
     def build_app(self) -> Application:
         """Build and configure the Telegram Application."""
-        app = Application.builder().token(self.config.bot_token).build()
+
+        async def _post_init(app: Application):
+            if os.environ.pop("_CLAUDE_TG_RESTARTED", None):
+                await app.bot.send_message(self.config.chat_id, "✅ Restart complete.")
+
+        app = Application.builder().token(self.config.bot_token).post_init(_post_init).build()
 
         # Commands
         app.add_handler(CommandHandler("clear", self.cmd_clear))
@@ -272,6 +291,7 @@ class ClaudeTelegramBot:
         app.add_handler(CommandHandler("cost", self.cmd_cost))
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("model", self.cmd_model))
+        app.add_handler(CommandHandler("restart", self.cmd_restart))
 
         # Callbacks
         app.add_handler(
