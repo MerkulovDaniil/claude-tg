@@ -29,6 +29,7 @@ On first run, the built-in MCP server for file sending is auto-registered in Cla
 | `/cancel` | Stop current task |
 | `/cost` | Show session cost |
 | `/model <name>` | Switch model (no args = show current) |
+| `/restart` | Full process restart (picks up CLI/config changes) |
 
 Inline **Cancel** button is shown on every message during processing.
 
@@ -36,7 +37,20 @@ Inline **Cancel** button is shown on every message during processing.
 
 - **Photos** — sent to Claude as file references, Claude can read/analyze them
 - **Documents** — same for files (PDF, code, etc.)
-- **Voice** — transcribed via Groq Whisper API and sent as text (requires `GROQ_API_KEY`)
+
+## Voice Messages
+
+Voice messages are transcribed via Groq Whisper API and sent to Claude as text.
+
+```bash
+# Install with voice support
+pip install 'claude-tg[voice]'
+
+# Set your Groq API key (free at console.groq.com)
+export GROQ_API_KEY="your_groq_api_key"
+```
+
+Without `GROQ_API_KEY`, the bot replies with a setup hint when a voice message is received.
 
 ## File Sending (MCP)
 
@@ -110,6 +124,7 @@ systemctl enable --now claude-tg
 - Compact tool call display with emoji icons
 - Root-compatible — auto-discovers and allows all MCP tools
 - Auto-registration of MCP server in Claude Code
+- In-place restart via `/restart` (no need to touch the server)
 
 ## Requirements
 
