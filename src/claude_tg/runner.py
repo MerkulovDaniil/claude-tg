@@ -111,6 +111,35 @@ class StreamParser:
         )
 
 
+_BUILTIN_TOOLS = [
+    "Bash()", "Edit()", "MultiEdit()", "Write()", "Read()",
+    "Glob()", "Grep()", "WebFetch()", "WebSearch()",
+    "Task()", "TodoWrite()", "NotebookEdit()", "NotebookRead()",
+]
+
+
+def _discover_mcp_servers(work_dir: str) -> list[str]:
+    """Read registered MCP server names from Claude config files."""
+    import os
+    from pathlib import Path
+
+    servers = set()
+    # Check both user-level and project-level MCP configs
+    for path in [
+        Path.home() / ".claude.json",
+        Path(work_dir) / ".mcp.json",
+    ]:
+        if path.is_file():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                for name in data.get("mcpServers", {}):
+                    servers.add(f"mcp__{name}")
+            except (json.JSONDecodeError, OSError):
+                pass
+    return sorted(servers)
+
+
 class ClaudeRunner:
     """Manages Claude Code CLI subprocess with streaming."""
 
@@ -142,17 +171,10 @@ class ClaudeRunner:
         if os.getuid() != 0:
             cmd.append("--dangerously-skip-permissions")
         else:
-            # Root can't use --dangerously-skip-permissions, use --allowedTools instead
-            cmd.extend([
-                "--allowedTools",
-                "Bash()", "Edit()", "MultiEdit()", "Write()", "Read()",
-                "Glob()", "Grep()", "WebFetch()", "WebSearch()",
-                "Task()", "TodoWrite()", "NotebookEdit()", "NotebookRead()",
-                "mcp__todoist", "mcp__google-calendar",
-                "mcp__garmin", "mcp__garmin-sleep",
-                "mcp__oura", "mcp__tavily",
-                "mcp__telegram", "mcp__claude-tg",
-            ])
+            # Root can't use --dangerously-skip-permissions
+            # Discover MCP servers and allow all tools dynamically
+            mcp_servers = _discover_mcp_servers(self.work_dir)
+            cmd.extend(["--allowedTools"] + _BUILTIN_TOOLS + mcp_servers)
 
         if self.session_id:
             cmd.extend(["--resume", self.session_id])
