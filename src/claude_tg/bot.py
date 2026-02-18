@@ -34,7 +34,9 @@ class ClaudeTelegramBot:
             model=config.model,
             max_budget=config.max_budget,
         )
-        self.media = MediaHandler()
+        self.media = MediaHandler(
+            upload_dir=os.path.join(config.work_dir, "claude-tg-uploads")
+        )
         self._stream: TelegramStream | None = None
         self._last_activity: float = time.time()
         self._session_cost: float = 0.0
