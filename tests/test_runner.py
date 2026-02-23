@@ -1,7 +1,11 @@
 """Tests for Claude Code stream-json event parsing and MCP config isolation."""
 import json
+import os
 import pytest
-from claude_tg.runner import StreamParser, RunnerEvent, EventType, _discover_mcp_servers, ClaudeRunner
+from claude_tg.runner import (
+    StreamParser, RunnerEvent, EventType,
+    _discover_mcp_servers, _build_mcp_config, ClaudeRunner,
+)
 
 
 def make_text_delta(text: str) -> dict:
@@ -181,11 +185,99 @@ class TestDiscoverMcpServers:
         assert result == []
 
 
+class TestBuildMcpConfig:
+    def test_excludes_servers(self, tmp_path):
+        """Excluded servers are removed from generated config."""
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {
+                "telegram": {"command": "mcp-telegram", "args": []},
+                "todoist": {"command": "npx", "args": []},
+                "oura": {"command": "python3", "args": []},
+            }
+        }))
+        result = _build_mcp_config(str(tmp_path), exclude=["telegram"])
+        assert result is not None
+        with open(result) as f:
+            data = json.load(f)
+        servers = data["mcpServers"]
+        assert "telegram" not in servers
+        assert "todoist" in servers
+        assert "oura" in servers
+        os.unlink(result)
+
+    def test_exclude_multiple(self, tmp_path):
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {
+                "telegram": {"command": "x"},
+                "garmin": {"command": "y"},
+                "todoist": {"command": "z"},
+            }
+        }))
+        result = _build_mcp_config(str(tmp_path), exclude=["telegram", "garmin"])
+        with open(result) as f:
+            data = json.load(f)
+        assert list(data["mcpServers"].keys()) == ["todoist"]
+        os.unlink(result)
+
+    def test_empty_exclude_keeps_all(self, tmp_path):
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {"a": {"command": "x"}, "b": {"command": "y"}}
+        }))
+        result = _build_mcp_config(str(tmp_path), exclude=[])
+        with open(result) as f:
+            data = json.load(f)
+        assert len(data["mcpServers"]) == 2
+        os.unlink(result)
+
+    def test_no_config_files_returns_none(self, tmp_path):
+        result = _build_mcp_config(str(tmp_path), exclude=["x"])
+        assert result is None
+
+    def test_exclude_nonexistent_server_is_harmless(self, tmp_path):
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {"todoist": {"command": "npx"}}
+        }))
+        result = _build_mcp_config(str(tmp_path), exclude=["nonexistent"])
+        with open(result) as f:
+            data = json.load(f)
+        assert "todoist" in data["mcpServers"]
+        os.unlink(result)
+
+
 class TestClaudeRunnerMcpConfig:
     def test_stores_mcp_config(self):
         runner = ClaudeRunner(work_dir="/tmp", mcp_config="/path/to/mcp.json")
         assert runner.mcp_config == "/path/to/mcp.json"
+        assert runner.effective_mcp_config == "/path/to/mcp.json"
 
     def test_no_mcp_config_by_default(self):
         runner = ClaudeRunner(work_dir="/tmp")
         assert runner.mcp_config is None
+        assert runner.effective_mcp_config is None
+
+    def test_mcp_exclude_generates_auto_config(self, tmp_path):
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {
+                "telegram": {"command": "x"},
+                "todoist": {"command": "y"},
+            }
+        }))
+        runner = ClaudeRunner(work_dir=str(tmp_path), mcp_exclude=["telegram"])
+        assert runner.effective_mcp_config is not None
+        with open(runner.effective_mcp_config) as f:
+            data = json.load(f)
+        assert "telegram" not in data["mcpServers"]
+        assert "todoist" in data["mcpServers"]
+
+    def test_explicit_config_overrides_exclude(self):
+        runner = ClaudeRunner(
+            work_dir="/tmp",
+            mcp_config="/explicit.json",
+            mcp_exclude=["telegram"],
+        )
+        assert runner.effective_mcp_config == "/explicit.json"

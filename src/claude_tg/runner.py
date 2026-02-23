@@ -147,19 +147,66 @@ def _discover_mcp_servers(work_dir: str, mcp_config: str | None = None) -> list[
     return sorted(servers)
 
 
+def _build_mcp_config(work_dir: str, exclude: list[str]) -> str | None:
+    """Build a filtered MCP config excluding specified servers.
+
+    Reads .mcp.json and ~/.claude.json, merges them, removes servers
+    from the exclude list, and writes a temp file. Returns the path
+    to the temp file, or None if no config files found.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    merged: dict = {}
+    for path in [Path.home() / ".claude.json", Path(work_dir) / ".mcp.json"]:
+        if path.is_file():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                for name, cfg in data.get("mcpServers", {}).items():
+                    merged[name] = cfg
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    if not merged:
+        return None
+
+    for name in exclude:
+        merged.pop(name, None)
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="claude-tg-mcp-")
+    with os.fdopen(fd, "w") as f:
+        json.dump({"mcpServers": merged}, f)
+    return tmp_path
+
+
 class ClaudeRunner:
     """Manages Claude Code CLI subprocess with streaming."""
 
     def __init__(self, work_dir: str, model: str | None = None,
-                 max_budget: float | None = None, mcp_config: str | None = None):
+                 max_budget: float | None = None,
+                 mcp_config: str | None = None,
+                 mcp_exclude: list[str] | None = None):
         self.work_dir = work_dir
         self.model = model
         self.max_budget = max_budget
         self.mcp_config = mcp_config
+        self.mcp_exclude = mcp_exclude or []
+        self._auto_mcp_config: str | None = None
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.is_running = False
         self._parser = StreamParser()
+
+        # Auto-generate filtered MCP config if exclude list is set and no explicit config
+        if self.mcp_exclude and not self.mcp_config:
+            self._auto_mcp_config = _build_mcp_config(work_dir, self.mcp_exclude)
+
+    @property
+    def effective_mcp_config(self) -> str | None:
+        """Return the MCP config path to use (explicit or auto-generated)."""
+        return self.mcp_config or self._auto_mcp_config
 
     def clear_session(self):
         self.session_id = None
@@ -176,8 +223,9 @@ class ClaudeRunner:
             "--include-partial-messages",
         ]
 
-        if self.mcp_config:
-            cmd.extend(["--mcp-config", self.mcp_config, "--strict-mcp-config"])
+        mcp_cfg = self.effective_mcp_config
+        if mcp_cfg:
+            cmd.extend(["--mcp-config", mcp_cfg, "--strict-mcp-config"])
 
         import os
         if os.getuid() != 0:
@@ -185,7 +233,7 @@ class ClaudeRunner:
         else:
             # Root can't use --dangerously-skip-permissions
             # Discover MCP servers and allow all tools dynamically
-            mcp_servers = _discover_mcp_servers(self.work_dir, self.mcp_config)
+            mcp_servers = _discover_mcp_servers(self.work_dir, mcp_cfg)
             cmd.extend(["--allowedTools"] + _BUILTIN_TOOLS + mcp_servers)
 
         if self.session_id:

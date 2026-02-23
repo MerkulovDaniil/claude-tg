@@ -34,6 +34,7 @@ class ClaudeTelegramBot:
             model=config.model,
             max_budget=config.max_budget,
             mcp_config=config.mcp_config,
+            mcp_exclude=config.mcp_exclude,
         )
         self.media = MediaHandler(
             upload_dir=os.path.join(config.work_dir, "claude-tg-uploads")
