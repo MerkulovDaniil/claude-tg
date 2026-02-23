@@ -26,10 +26,6 @@ class Config:
             os.environ.get("CLAUDE_TG_TRIGGER_PORT", "0")
         )
         self.mcp_config: str | None = os.environ.get("CLAUDE_TG_MCP_CONFIG")
-        exclude = os.environ.get("CLAUDE_TG_MCP_EXCLUDE", "")
-        self.mcp_exclude: list[str] = [
-            s.strip() for s in exclude.split(",") if s.strip()
-        ]
 
     def validate(self) -> list[str]:
         """Return list of validation errors. Empty = valid."""

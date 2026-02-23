@@ -186,8 +186,8 @@ class TestDiscoverMcpServers:
 
 
 class TestBuildMcpConfig:
-    def test_excludes_servers(self, tmp_path):
-        """Excluded servers are removed from generated config."""
+    def test_copies_all_servers(self, tmp_path):
+        """All servers from .mcp.json are copied to isolated config."""
         mcp = tmp_path / ".mcp.json"
         mcp.write_text(json.dumps({
             "mcpServers": {
@@ -196,56 +196,19 @@ class TestBuildMcpConfig:
                 "oura": {"command": "python3", "args": []},
             }
         }))
-        result = _build_mcp_config(str(tmp_path), exclude=["telegram"])
+        result = _build_mcp_config(str(tmp_path))
         assert result is not None
         with open(result) as f:
             data = json.load(f)
-        servers = data["mcpServers"]
-        assert "telegram" not in servers
-        assert "todoist" in servers
-        assert "oura" in servers
-        os.unlink(result)
-
-    def test_exclude_multiple(self, tmp_path):
-        mcp = tmp_path / ".mcp.json"
-        mcp.write_text(json.dumps({
-            "mcpServers": {
-                "telegram": {"command": "x"},
-                "garmin": {"command": "y"},
-                "todoist": {"command": "z"},
-            }
-        }))
-        result = _build_mcp_config(str(tmp_path), exclude=["telegram", "garmin"])
-        with open(result) as f:
-            data = json.load(f)
-        assert list(data["mcpServers"].keys()) == ["todoist"]
-        os.unlink(result)
-
-    def test_empty_exclude_keeps_all(self, tmp_path):
-        mcp = tmp_path / ".mcp.json"
-        mcp.write_text(json.dumps({
-            "mcpServers": {"a": {"command": "x"}, "b": {"command": "y"}}
-        }))
-        result = _build_mcp_config(str(tmp_path), exclude=[])
-        with open(result) as f:
-            data = json.load(f)
-        assert len(data["mcpServers"]) == 2
+        assert len(data["mcpServers"]) == 3
+        assert "telegram" in data["mcpServers"]
+        assert "todoist" in data["mcpServers"]
+        assert "oura" in data["mcpServers"]
         os.unlink(result)
 
     def test_no_config_files_returns_none(self, tmp_path):
-        result = _build_mcp_config(str(tmp_path), exclude=["x"])
+        result = _build_mcp_config(str(tmp_path))
         assert result is None
-
-    def test_exclude_nonexistent_server_is_harmless(self, tmp_path):
-        mcp = tmp_path / ".mcp.json"
-        mcp.write_text(json.dumps({
-            "mcpServers": {"todoist": {"command": "npx"}}
-        }))
-        result = _build_mcp_config(str(tmp_path), exclude=["nonexistent"])
-        with open(result) as f:
-            data = json.load(f)
-        assert "todoist" in data["mcpServers"]
-        os.unlink(result)
 
 
 class TestClaudeRunnerMcpConfig:
@@ -264,25 +227,6 @@ class TestClaudeRunnerMcpConfig:
         assert runner.mcp_config is None
         assert runner.effective_mcp_config is not None
 
-    def test_mcp_exclude_generates_auto_config(self, tmp_path):
-        mcp = tmp_path / ".mcp.json"
-        mcp.write_text(json.dumps({
-            "mcpServers": {
-                "telegram": {"command": "x"},
-                "todoist": {"command": "y"},
-            }
-        }))
-        runner = ClaudeRunner(work_dir=str(tmp_path), mcp_exclude=["telegram"])
-        assert runner.effective_mcp_config is not None
-        with open(runner.effective_mcp_config) as f:
-            data = json.load(f)
-        assert "telegram" not in data["mcpServers"]
-        assert "todoist" in data["mcpServers"]
-
-    def test_explicit_config_overrides_exclude(self):
-        runner = ClaudeRunner(
-            work_dir="/tmp",
-            mcp_config="/explicit.json",
-            mcp_exclude=["telegram"],
-        )
+    def test_explicit_config_skips_auto(self):
+        runner = ClaudeRunner(work_dir="/tmp", mcp_config="/explicit.json")
         assert runner.effective_mcp_config == "/explicit.json"

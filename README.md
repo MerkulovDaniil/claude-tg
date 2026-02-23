@@ -107,13 +107,7 @@ All registered MCP servers and built-in tools are allowed automatically. No hard
 
 ## MCP Isolation
 
-`claude-tg` automatically isolates its MCP servers from interactive `claude` CLI sessions. Each subprocess gets its own config via `--strict-mcp-config`, so you can run both side by side without deadlocks.
-
-If a specific MCP server still conflicts (e.g. one that locks a session file), you can exclude it:
-
-```bash
-claude-tg --mcp-exclude telegram
-```
+`claude-tg` automatically isolates its MCP servers from interactive `claude` CLI sessions. Each subprocess gets its own config via `--strict-mcp-config`, so you can run both side by side without deadlocks. Zero configuration needed.
 
 ## Systemd (VPS deployment)
 

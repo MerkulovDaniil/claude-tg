@@ -28,10 +28,6 @@ def main():
         "--mcp-config",
         help="Path to MCP config JSON (uses --strict-mcp-config, isolates from other Claude sessions)",
     )
-    parser.add_argument(
-        "--mcp-exclude",
-        help="Comma-separated MCP server names to exclude (e.g. telegram,garmin)",
-    )
     args = parser.parse_args()
 
     # CLI args override env vars
@@ -41,8 +37,6 @@ def main():
         os.environ["CLAUDE_TG_VERBOSE"] = "1"
     if args.mcp_config:
         os.environ["CLAUDE_TG_MCP_CONFIG"] = args.mcp_config
-    if args.mcp_exclude:
-        os.environ["CLAUDE_TG_MCP_EXCLUDE"] = args.mcp_exclude
 
     # Configure logging
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()

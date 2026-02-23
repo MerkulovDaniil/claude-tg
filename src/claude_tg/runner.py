@@ -147,12 +147,13 @@ def _discover_mcp_servers(work_dir: str, mcp_config: str | None = None) -> list[
     return sorted(servers)
 
 
-def _build_mcp_config(work_dir: str, exclude: list[str]) -> str | None:
-    """Build a filtered MCP config excluding specified servers.
+def _build_mcp_config(work_dir: str) -> str | None:
+    """Build an isolated MCP config for this subprocess.
 
-    Reads .mcp.json and ~/.claude.json, merges them, removes servers
-    from the exclude list, and writes a temp file. Returns the path
-    to the temp file, or None if no config files found.
+    Reads .mcp.json and ~/.claude.json, merges servers, and writes
+    a temp file. Used with --strict-mcp-config so each claude-tg
+    subprocess has its own MCP config independent of the interactive CLI.
+    Returns the path to the temp file, or None if no config files found.
     """
     import os
     import tempfile
@@ -172,9 +173,6 @@ def _build_mcp_config(work_dir: str, exclude: list[str]) -> str | None:
     if not merged:
         return None
 
-    for name in exclude:
-        merged.pop(name, None)
-
     fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="claude-tg-mcp-")
     with os.fdopen(fd, "w") as f:
         json.dump({"mcpServers": merged}, f)
@@ -186,13 +184,11 @@ class ClaudeRunner:
 
     def __init__(self, work_dir: str, model: str | None = None,
                  max_budget: float | None = None,
-                 mcp_config: str | None = None,
-                 mcp_exclude: list[str] | None = None):
+                 mcp_config: str | None = None):
         self.work_dir = work_dir
         self.model = model
         self.max_budget = max_budget
         self.mcp_config = mcp_config
-        self.mcp_exclude = mcp_exclude or []
         self._auto_mcp_config: str | None = None
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
@@ -201,7 +197,7 @@ class ClaudeRunner:
 
         # Always auto-generate isolated MCP config (unless explicit config given)
         if not self.mcp_config:
-            self._auto_mcp_config = _build_mcp_config(work_dir, self.mcp_exclude)
+            self._auto_mcp_config = _build_mcp_config(work_dir)
 
     @property
     def effective_mcp_config(self) -> str | None:
