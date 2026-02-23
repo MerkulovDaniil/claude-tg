@@ -37,6 +37,7 @@ class ClaudeTelegramBot:
         self.media = MediaHandler(
             upload_dir=os.path.join(config.work_dir, "claude-tg-uploads")
         )
+        self._app: Application | None = None
         self._stream: TelegramStream | None = None
         self._last_activity: float = time.time()
         self._session_cost: float = 0.0
@@ -276,14 +277,49 @@ class ClaudeTelegramBot:
                 self._pending_context = None
                 await self._schedule_debounce(ctx)
 
+    # --- Trigger server ---
+
+    async def _start_trigger_server(self, port: int):
+        """Start localhost HTTP server for external triggers (cron, scripts)."""
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            data = await reader.read(65536)
+            # Support both raw body and HTTP POST
+            if b"\r\n\r\n" in data:
+                body = data.split(b"\r\n\r\n", 1)[1]
+            else:
+                body = data
+            prompt = body.decode(errors="replace").strip()
+
+            if prompt:
+                logger.info("Trigger: %d chars", len(prompt))
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                await writer.drain()
+                writer.close()
+                # Inject into the normal message pipeline
+                ctx = type("_Ctx", (), {"bot": self._app.bot})()
+                self._buffer.append(prompt)
+                await self._schedule_debounce(ctx)
+            else:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nempty")
+                await writer.drain()
+                writer.close()
+
+        await asyncio.start_server(handle, "127.0.0.1", port)
+        logger.info("Trigger server on 127.0.0.1:%d", port)
+
     # --- App setup ---
 
     def build_app(self) -> Application:
         """Build and configure the Telegram Application."""
+        trigger_port = self.config.trigger_port
 
         async def _post_init(app: Application):
+            self._app = app
             if os.environ.pop("_CLAUDE_TG_RESTARTED", None):
                 await app.bot.send_message(self.config.chat_id, "✅ Restart complete.")
+            if trigger_port:
+                await self._start_trigger_server(trigger_port)
 
         app = Application.builder().token(self.config.bot_token).post_init(_post_init).build()
 

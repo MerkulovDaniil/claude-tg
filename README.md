@@ -52,6 +52,25 @@ export GROQ_API_KEY="your_groq_api_key"
 
 Without `GROQ_API_KEY`, the bot replies with a setup hint when a voice message is received.
 
+## Triggers (External Prompts)
+
+Enable a localhost HTTP server so cron jobs, scripts, or other processes can inject prompts into your chat:
+
+```bash
+export CLAUDE_TG_TRIGGER_PORT=9357   # any free port
+```
+
+Then trigger from anywhere:
+
+```bash
+curl -s -d "Run the /morning skill" localhost:9357
+# → ok
+```
+
+- The response appears as a normal chat message — you can reply and continue the conversation
+- If Claude is busy, the prompt queues and processes after the current task
+- Localhost only — not exposed to the network
+
 ## File Sending (MCP)
 
 Claude can send files back to you via the built-in MCP server:
@@ -84,6 +103,7 @@ All registered MCP servers and built-in tools are allowed automatically. No hard
 | `CLAUDE_TG_SESSION_TIMEOUT` | `3600` | Auto-reset after N seconds of inactivity |
 | `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram message update interval (seconds) |
 | `GROQ_API_KEY` | — | Groq API key for voice transcription |
+| `CLAUDE_TG_TRIGGER_PORT` | — | Localhost port for external triggers (e.g. `9357`) |
 
 ## Systemd (VPS deployment)
 
@@ -125,6 +145,7 @@ systemctl enable --now claude-tg
 - Root-compatible — auto-discovers and allows all MCP tools
 - Auto-registration of MCP server in Claude Code
 - In-place restart via `/restart` (no need to touch the server)
+- External triggers — cron/scripts can inject prompts via localhost HTTP
 
 ## Requirements
 

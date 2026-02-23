@@ -22,6 +22,9 @@ class Config:
             os.environ.get("CLAUDE_TG_UPDATE_INTERVAL", "2.0")
         )
         self.groq_api_key: str | None = os.environ.get("GROQ_API_KEY")
+        self.trigger_port: int = int(
+            os.environ.get("CLAUDE_TG_TRIGGER_PORT", "0")
+        )
 
     def validate(self) -> list[str]:
         """Return list of validation errors. Empty = valid."""
