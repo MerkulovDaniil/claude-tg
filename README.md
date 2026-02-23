@@ -111,18 +111,17 @@ All registered MCP servers and built-in tools are allowed automatically. No hard
 
 When running `claude-tg` alongside an interactive `claude` CLI session in the same directory, both processes start duplicate MCP servers from the same `.mcp.json`. Servers with exclusive resources (e.g. Telegram's Telethon session, Garmin tokens) will deadlock.
 
-**Automatic isolation** — just list the conflicting servers to exclude:
+Exclude conflicting servers so they only run in the interactive CLI:
 
 ```bash
-export CLAUDE_TG_MCP_EXCLUDE="telegram"
-
-# Or via CLI
 claude-tg --mcp-exclude telegram,garmin
 ```
 
-`claude-tg` reads your `.mcp.json` at startup, removes the excluded servers, and passes an auto-generated config via `--strict-mcp-config`. New servers added to `.mcp.json` are automatically available — no manual sync needed.
+Or via env var: `CLAUDE_TG_MCP_EXCLUDE=telegram,garmin`
 
-For full control, you can also provide an explicit config file via `CLAUDE_TG_MCP_CONFIG` (takes precedence over `--mcp-exclude`).
+At startup, `claude-tg` reads your `.mcp.json`, removes excluded servers, and passes the rest via `--strict-mcp-config`. New servers added to `.mcp.json` are automatically available — no manual sync.
+
+For full control, `CLAUDE_TG_MCP_CONFIG=/path/to/config.json` overrides everything.
 
 ## Systemd (VPS deployment)
 
