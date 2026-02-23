@@ -254,10 +254,15 @@ class TestClaudeRunnerMcpConfig:
         assert runner.mcp_config == "/path/to/mcp.json"
         assert runner.effective_mcp_config == "/path/to/mcp.json"
 
-    def test_no_mcp_config_by_default(self):
-        runner = ClaudeRunner(work_dir="/tmp")
+    def test_auto_generates_config_by_default(self, tmp_path):
+        """Even without explicit config, auto-generates isolated MCP config."""
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({
+            "mcpServers": {"todoist": {"command": "npx"}}
+        }))
+        runner = ClaudeRunner(work_dir=str(tmp_path))
         assert runner.mcp_config is None
-        assert runner.effective_mcp_config is None
+        assert runner.effective_mcp_config is not None
 
     def test_mcp_exclude_generates_auto_config(self, tmp_path):
         mcp = tmp_path / ".mcp.json"

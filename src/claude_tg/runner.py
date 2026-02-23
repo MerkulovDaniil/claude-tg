@@ -199,8 +199,8 @@ class ClaudeRunner:
         self.is_running = False
         self._parser = StreamParser()
 
-        # Auto-generate filtered MCP config if exclude list is set and no explicit config
-        if self.mcp_exclude and not self.mcp_config:
+        # Always auto-generate isolated MCP config (unless explicit config given)
+        if not self.mcp_config:
             self._auto_mcp_config = _build_mcp_config(work_dir, self.mcp_exclude)
 
     @property

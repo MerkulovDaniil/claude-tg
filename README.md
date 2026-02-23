@@ -104,24 +104,16 @@ All registered MCP servers and built-in tools are allowed automatically. No hard
 | `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram message update interval (seconds) |
 | `GROQ_API_KEY` | — | Groq API key for voice transcription |
 | `CLAUDE_TG_TRIGGER_PORT` | — | Localhost port for external triggers (e.g. `9357`) |
-| `CLAUDE_TG_MCP_EXCLUDE` | — | Comma-separated MCP servers to exclude (e.g. `telegram,garmin`) |
-| `CLAUDE_TG_MCP_CONFIG` | — | Explicit MCP config JSON path (overrides auto-generation) |
 
 ## MCP Isolation
 
-When running `claude-tg` alongside an interactive `claude` CLI session in the same directory, both processes start duplicate MCP servers from the same `.mcp.json`. Servers with exclusive resources (e.g. Telegram's Telethon session, Garmin tokens) will deadlock.
+`claude-tg` automatically isolates its MCP servers from interactive `claude` CLI sessions. Each subprocess gets its own config via `--strict-mcp-config`, so you can run both side by side without deadlocks.
 
-Exclude conflicting servers so they only run in the interactive CLI:
+If a specific MCP server still conflicts (e.g. one that locks a session file), you can exclude it:
 
 ```bash
-claude-tg --mcp-exclude telegram,garmin
+claude-tg --mcp-exclude telegram
 ```
-
-Or via env var: `CLAUDE_TG_MCP_EXCLUDE=telegram,garmin`
-
-At startup, `claude-tg` reads your `.mcp.json`, removes excluded servers, and passes the rest via `--strict-mcp-config`. New servers added to `.mcp.json` are automatically available — no manual sync.
-
-For full control, `CLAUDE_TG_MCP_CONFIG=/path/to/config.json` overrides everything.
 
 ## Systemd (VPS deployment)
 
