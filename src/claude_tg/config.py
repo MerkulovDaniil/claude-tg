@@ -25,6 +25,7 @@ class Config:
         self.trigger_port: int = int(
             os.environ.get("CLAUDE_TG_TRIGGER_PORT", "0")
         )
+        self.mcp_config: str | None = os.environ.get("CLAUDE_TG_MCP_CONFIG")
 
     def validate(self) -> list[str]:
         """Return list of validation errors. Empty = valid."""

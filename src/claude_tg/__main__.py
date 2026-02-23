@@ -24,6 +24,10 @@ def main():
         action="store_true",
         help="Show tool results in expandable blockquotes",
     )
+    parser.add_argument(
+        "--mcp-config",
+        help="Path to MCP config JSON (uses --strict-mcp-config, isolates from other Claude sessions)",
+    )
     args = parser.parse_args()
 
     # CLI args override env vars
@@ -31,6 +35,8 @@ def main():
         os.environ["CLAUDE_WORK_DIR"] = args.work_dir
     if args.verbose:
         os.environ["CLAUDE_TG_VERBOSE"] = "1"
+    if args.mcp_config:
+        os.environ["CLAUDE_TG_MCP_CONFIG"] = args.mcp_config
 
     # Configure logging
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()

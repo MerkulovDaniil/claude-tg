@@ -118,17 +118,24 @@ _BUILTIN_TOOLS = [
 ]
 
 
-def _discover_mcp_servers(work_dir: str) -> list[str]:
-    """Read registered MCP server names from Claude config files."""
+def _discover_mcp_servers(work_dir: str, mcp_config: str | None = None) -> list[str]:
+    """Read registered MCP server names from Claude config files.
+
+    When mcp_config is provided, reads only from that file (matching
+    --strict-mcp-config behavior). Otherwise checks default locations.
+    """
     import os
     from pathlib import Path
 
     servers = set()
-    # Check both user-level and project-level MCP configs
-    for path in [
-        Path.home() / ".claude.json",
-        Path(work_dir) / ".mcp.json",
-    ]:
+    if mcp_config:
+        config_paths = [Path(mcp_config)]
+    else:
+        config_paths = [
+            Path.home() / ".claude.json",
+            Path(work_dir) / ".mcp.json",
+        ]
+    for path in config_paths:
         if path.is_file():
             try:
                 with open(path) as f:
@@ -143,10 +150,12 @@ def _discover_mcp_servers(work_dir: str) -> list[str]:
 class ClaudeRunner:
     """Manages Claude Code CLI subprocess with streaming."""
 
-    def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None):
+    def __init__(self, work_dir: str, model: str | None = None,
+                 max_budget: float | None = None, mcp_config: str | None = None):
         self.work_dir = work_dir
         self.model = model
         self.max_budget = max_budget
+        self.mcp_config = mcp_config
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.is_running = False
@@ -167,13 +176,16 @@ class ClaudeRunner:
             "--include-partial-messages",
         ]
 
+        if self.mcp_config:
+            cmd.extend(["--mcp-config", self.mcp_config, "--strict-mcp-config"])
+
         import os
         if os.getuid() != 0:
             cmd.append("--dangerously-skip-permissions")
         else:
             # Root can't use --dangerously-skip-permissions
             # Discover MCP servers and allow all tools dynamically
-            mcp_servers = _discover_mcp_servers(self.work_dir)
+            mcp_servers = _discover_mcp_servers(self.work_dir, self.mcp_config)
             cmd.extend(["--allowedTools"] + _BUILTIN_TOOLS + mcp_servers)
 
         if self.session_id:

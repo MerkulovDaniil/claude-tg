@@ -1,7 +1,7 @@
-"""Tests for Claude Code stream-json event parsing."""
+"""Tests for Claude Code stream-json event parsing and MCP config isolation."""
 import json
 import pytest
-from claude_tg.runner import StreamParser, RunnerEvent, EventType
+from claude_tg.runner import StreamParser, RunnerEvent, EventType, _discover_mcp_servers, ClaudeRunner
 
 
 def make_text_delta(text: str) -> dict:
@@ -134,3 +134,58 @@ class TestStreamParser:
             {"type": "stream_event", "event": {"type": "message_stop"}, "session_id": "x"}
         )
         assert event is None
+
+
+class TestDiscoverMcpServers:
+    def test_reads_from_custom_mcp_config(self, tmp_path):
+        """When mcp_config is set, only that file is read."""
+        custom = tmp_path / "custom-mcp.json"
+        custom.write_text(json.dumps({
+            "mcpServers": {
+                "oura": {"command": "python3", "args": []},
+                "todoist": {"command": "npx", "args": []},
+            }
+        }))
+        # This file should be ignored when custom config is provided
+        project_mcp = tmp_path / ".mcp.json"
+        project_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "telegram": {"command": "mcp-telegram", "args": []},
+            }
+        }))
+
+        result = _discover_mcp_servers(str(tmp_path), mcp_config=str(custom))
+        assert "mcp__oura" in result
+        assert "mcp__todoist" in result
+        assert "mcp__telegram" not in result
+
+    def test_default_reads_project_mcp(self, tmp_path):
+        """Without mcp_config, reads from .mcp.json in work_dir."""
+        project_mcp = tmp_path / ".mcp.json"
+        project_mcp.write_text(json.dumps({
+            "mcpServers": {"garmin": {"command": "garth", "args": []}}
+        }))
+        result = _discover_mcp_servers(str(tmp_path))
+        assert "mcp__garmin" in result
+
+    def test_missing_custom_config_returns_empty(self, tmp_path):
+        """Non-existent mcp_config file returns no servers."""
+        result = _discover_mcp_servers(str(tmp_path), mcp_config=str(tmp_path / "nope.json"))
+        assert result == []
+
+    def test_malformed_json_returns_empty(self, tmp_path):
+        """Malformed JSON is silently ignored."""
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json")
+        result = _discover_mcp_servers(str(tmp_path), mcp_config=str(bad))
+        assert result == []
+
+
+class TestClaudeRunnerMcpConfig:
+    def test_stores_mcp_config(self):
+        runner = ClaudeRunner(work_dir="/tmp", mcp_config="/path/to/mcp.json")
+        assert runner.mcp_config == "/path/to/mcp.json"
+
+    def test_no_mcp_config_by_default(self):
+        runner = ClaudeRunner(work_dir="/tmp")
+        assert runner.mcp_config is None
