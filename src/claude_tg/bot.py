@@ -296,10 +296,26 @@ class ClaudeTelegramBot:
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
                 await writer.drain()
                 writer.close()
-                # Inject into the normal message pipeline
-                ctx = type("_Ctx", (), {"bot": self._app.bot})()
-                self._buffer.append(prompt)
-                await self._schedule_debounce(ctx)
+
+                if prompt.startswith("DIRECT:"):
+                    # Send directly to Telegram without running Claude.
+                    # Useful for cron jobs, monitoring scripts, heartbeats.
+                    text = prompt[7:].strip()
+                    if text:
+                        try:
+                            await self._app.bot.send_message(
+                                chat_id=self.config.chat_id,
+                                text=text,
+                                disable_web_page_preview=True,
+                            )
+                            logger.info("Direct message sent: %d chars", len(text))
+                        except Exception as e:
+                            logger.error("Direct send failed: %s", e)
+                else:
+                    # Inject into the normal message pipeline
+                    ctx = type("_Ctx", (), {"bot": self._app.bot})()
+                    self._buffer.append(prompt)
+                    await self._schedule_debounce(ctx)
             else:
                 writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nempty")
                 await writer.drain()
