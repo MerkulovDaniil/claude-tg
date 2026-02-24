@@ -43,11 +43,7 @@ Inline **Cancel** button is shown on every message during processing.
 Voice messages are transcribed via Groq Whisper API and sent to Claude as text.
 
 ```bash
-# Install with voice support
-pip install 'claude-tg[voice]'
-
-# Set your Groq API key (free at console.groq.com)
-export GROQ_API_KEY="your_groq_api_key"
+export GROQ_API_KEY="your_groq_api_key"  # free at console.groq.com
 ```
 
 Without `GROQ_API_KEY`, the bot replies with a setup hint when a voice message is received.
@@ -63,12 +59,18 @@ export CLAUDE_TG_TRIGGER_PORT=9357   # any free port
 Then trigger from anywhere:
 
 ```bash
+# Run a prompt through Claude (normal mode)
 curl -s -d "Run the /morning skill" localhost:9357
-# → ok
+
+# Send a message directly to Telegram without running Claude (DIRECT mode)
+curl -s -d "DIRECT:Deploy complete, all tests pass ✅" localhost:9357
 ```
 
-- The response appears as a normal chat message — you can reply and continue the conversation
-- If Claude is busy, the prompt queues and processes after the current task
+**Normal mode** — the prompt is processed by Claude and the response appears as a chat message. You can reply and continue the conversation.
+
+**DIRECT mode** — prefix the body with `DIRECT:` to send text straight to Telegram, bypassing Claude entirely. Useful for cron notifications, monitoring alerts, or scripts that already have their output ready.
+
+- If Claude is busy, normal-mode prompts queue and process after the current task
 - Localhost only — not exposed to the network
 
 ## File Sending (MCP)
@@ -109,7 +111,7 @@ All registered MCP servers and built-in tools are allowed automatically. No hard
 
 ```bash
 # Install
-uv tool install 'claude-tg[voice]'
+uv tool install claude-tg
 
 # Create service
 cat > /etc/systemd/system/claude-tg.service << 'EOF'
@@ -146,6 +148,7 @@ systemctl enable --now claude-tg
 - Auto-registration of MCP server in Claude Code
 - In-place restart via `/restart` (no need to touch the server)
 - External triggers — cron/scripts can inject prompts via localhost HTTP
+- Direct message mode — send to Telegram without Claude processing (`DIRECT:` prefix)
 
 ## Requirements
 
