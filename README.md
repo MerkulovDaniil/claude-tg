@@ -20,10 +20,6 @@ claude-tg keeps a **single persistent Claude Code process** alive using the offi
 
 ~1,500 lines of Python. No framework, no database, no Docker.
 
-<p align="center">
-<img src="demo.png" alt="claude-tg demo — tool calls, code diffs, mid-turn injection" width="400">
-</p>
-
 ## Quick start
 
 ```bash
