@@ -20,6 +20,7 @@ from .runner import ClaudeRunner, EventType
 from .stream import TelegramStream
 from .media import MediaHandler
 from .formatter import format_tool_call, format_tool_result
+from .conversation_log import ConversationLog
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class ClaudeTelegramBot:
         self.media = MediaHandler(
             upload_dir=os.path.join(config.work_dir, "claude-tg-uploads")
         )
+        self.conversation_log = ConversationLog(config.work_dir)
         self._app: Application | None = None
         self._stream: TelegramStream | None = None
         self._last_activity: float = time.time()
@@ -223,6 +225,9 @@ class ClaudeTelegramBot:
         # Build prompt with media references
         prompt = self.media.build_prompt(text, photos, docs)
 
+        # Log user message
+        self.conversation_log.log_user(text)
+
         # Create cancel button
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🛑 Cancel", callback_data="claude_cancel")]]
@@ -238,10 +243,12 @@ class ClaudeTelegramBot:
         self._stream = stream
         await stream.start()
 
+        response_text = []
         try:
             async for event in self.runner.run(prompt):
                 if event.type == EventType.TEXT_DELTA:
                     await stream.push_text(event.text)
+                    response_text.append(event.text)
 
                 elif event.type == EventType.TOOL_USE:
                     line = format_tool_call(event.tool_name, event.tool_input)
@@ -256,10 +263,13 @@ class ClaudeTelegramBot:
                     duration = event.duration_ms // 1000
                     footer = f"⏱ {duration}s · {event.num_turns} turns"
                     await stream.finalize(footer=footer)
+                    # Log assistant response
+                    self.conversation_log.log_assistant("".join(response_text))
 
             # If no RESULT event came (shouldn't happen, but safety)
             if self.runner.is_running is False and stream == self._stream:
                 await stream.finalize()
+                self.conversation_log.log_assistant("".join(response_text))
 
         except Exception as e:
             logger.exception("Error running Claude")
@@ -308,10 +318,14 @@ class ClaudeTelegramBot:
                                 text=text,
                                 disable_web_page_preview=True,
                             )
+                            self.conversation_log.log_direct(text)
                             logger.info("Direct message sent: %d chars", len(text))
                         except Exception as e:
                             logger.error("Direct send failed: %s", e)
                 else:
+                    # Log trigger prompt
+                    self.conversation_log.log_trigger(prompt)
+
                     # Echo trigger prompt in chat so user sees same context as Claude
                     try:
                         MAX_ECHO = 4000

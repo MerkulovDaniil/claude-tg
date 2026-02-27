@@ -1,8 +1,10 @@
-"""MCP server for sending files to Telegram."""
+"""MCP server for sending files and reading conversation history."""
 import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+
+from .conversation_log import ConversationLog
 
 mcp = FastMCP("claude-tg")
 
@@ -40,6 +42,19 @@ async def send_telegram_file(file_path: str, caption: str = "", temp_file: bool 
         path.unlink(missing_ok=True)
 
     return f"File {path.name} sent to Telegram"
+
+
+@mcp.tool()
+async def get_conversation_context(limit: int = 30, max_chars: int = 20000) -> str:
+    """Get recent Telegram conversation history — messages the user sees in chat.
+
+    Includes: user messages, Feanor responses, trigger prompts (heartbeat/worker),
+    and DIRECT alerts. Use this to understand the full dialog context.
+    """
+    work_dir = os.environ.get("CLAUDE_WORK_DIR", os.getcwd())
+    log = ConversationLog(work_dir)
+    context = log.format_context(limit=limit, max_chars=max_chars)
+    return context or "(no conversation history yet)"
 
 
 def main():
