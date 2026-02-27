@@ -1,120 +1,92 @@
 # claude-tg
 
-Claude Code CLI <-> Telegram bridge. Chat with Claude Code from your phone — full agentic experience through Telegram with token-level streaming.
+**Full Claude Code on your phone.** Not a chatbot wrapper — the real agentic CLI with tools, MCP servers, and file access, streamed to Telegram with token-level updates.
 
-## Install
-
-```bash
-pip install claude-tg
+```
+pip install claude-tg     # or: uv tool install claude-tg
 ```
 
-## Quick Start
+## What makes this different
+
+Most Telegram bridges for Claude spawn a **new process per message** and parse the output. claude-tg keeps a **persistent Claude Code process** alive using the `--input-format stream-json` protocol — the same streaming interface the CLI uses internally.
+
+This means:
+
+- **No startup delay** — the process is already running, responses begin instantly
+- **Mid-turn message injection** — send a message while Claude is working, it arrives in-context (not queued for "after")
+- **Full tool access** — every MCP server, every built-in tool, file I/O, Bash — all work exactly like in the terminal
+- **Real streaming** — token-by-token updates to Telegram, not periodic polling
+
+~1,500 lines of Python total. No framework, no database, no Docker required.
+
+## Quick start
 
 ```bash
-export TELEGRAM_BOT_TOKEN="your_bot_token"   # from @BotFather
-export TELEGRAM_CHAT_ID="your_chat_id"       # your Telegram user ID
-export CLAUDE_WORK_DIR="/path/to/project"    # optional, defaults to cwd
-
+export TELEGRAM_BOT_TOKEN="..."    # from @BotFather
+export TELEGRAM_CHAT_ID="..."      # your Telegram user ID
 claude-tg
 ```
 
-On first run, the built-in MCP server for file sending is auto-registered in Claude Code.
+That's it. On first run, the built-in MCP server for file sending is auto-registered.
 
-## Commands
+## Features
 
-| Command | Description |
-|---------|-------------|
-| `/clear` | Reset session (new context) |
-| `/compact` | Compact conversation context |
-| `/cancel` | Stop current task |
-| `/cost` | Show session cost |
-| `/model <name>` | Switch model (no args = show current) |
-| `/restart` | Full process restart (picks up CLI/config changes) |
+**Core**
+- Token-level streaming with automatic message chaining (long outputs split at ~3800 chars)
+- Persistent process — one Claude subprocess lives across all turns
+- Mid-turn injection — messages sent during processing go directly into the running conversation
+- Inline cancel button on every message
 
-Inline **Cancel** button is shown on every message during processing.
+**Media**
+- Photos and documents sent to Claude as file references
+- Voice messages transcribed via Groq Whisper (free API)
+- Claude can send files back via built-in MCP server
 
-## Media
+**Automation**
+- Trigger server — cron jobs and scripts inject prompts via `localhost:PORT`
+- `DIRECT:` mode — send messages to Telegram bypassing Claude (for notifications)
+- Conversation log — persistent chat history in `~/.claude-tg/conversation.log`
 
-- **Photos** — sent to Claude as file references, Claude can read/analyze them
-- **Documents** — same for files (PDF, code, etc.)
+**Operations**
+- `/clear` — reset session
+- `/compact` — compact conversation context
+- `/cancel` — stop current task
+- `/cost` — show session spend
+- `/model <name>` — switch model on the fly
+- `/restart` — in-place process restart
 
-## Voice Messages
-
-Voice messages are transcribed via Groq Whisper API and sent to Claude as text.
+## Triggers (external automation)
 
 ```bash
-export GROQ_API_KEY="your_groq_api_key"  # free at console.groq.com
+export CLAUDE_TG_TRIGGER_PORT=9357
 ```
 
-Without `GROQ_API_KEY`, the bot replies with a setup hint when a voice message is received.
-
-## Triggers (External Prompts)
-
-Enable a localhost HTTP server so cron jobs, scripts, or other processes can inject prompts into your chat:
-
 ```bash
-export CLAUDE_TG_TRIGGER_PORT=9357   # any free port
+# Run a prompt through Claude
+curl -d "Summarize today's git log" localhost:9357
+
+# Send directly to Telegram without Claude
+curl -d "DIRECT:Deploy complete ✅" localhost:9357
 ```
 
-Then trigger from anywhere:
+Prompts queue if Claude is busy. Localhost only.
+
+## Voice messages
 
 ```bash
-# Run a prompt through Claude (normal mode)
-curl -s -d "Run the /morning skill" localhost:9357
-
-# Send a message directly to Telegram without running Claude (DIRECT mode)
-curl -s -d "DIRECT:Deploy complete, all tests pass ✅" localhost:9357
+export GROQ_API_KEY="..."  # free at console.groq.com
 ```
 
-**Normal mode** — the prompt is processed by Claude and the response appears as a chat message. You can reply and continue the conversation.
+Voice → Whisper transcription → Claude. Without the key, voice messages show a setup hint.
 
-**DIRECT mode** — prefix the body with `DIRECT:` to send text straight to Telegram, bypassing Claude entirely. Useful for cron notifications, monitoring alerts, or scripts that already have their output ready.
-
-- If Claude is busy, normal-mode prompts queue and process after the current task
-- Localhost only — not exposed to the network
-
-## File Sending (MCP)
-
-Claude can send files back to you via the built-in MCP server:
-
-- `send_telegram_file(file_path, caption?, temp_file?)` — sends a file to your Telegram
-- `temp_file=True` (default) — file is deleted after sending (for generated/temporary files)
-- `temp_file=False` — file is preserved (for existing project files)
-
-The MCP server (`claude-tg-mcp`) is auto-registered on launch. No manual setup needed.
-
-## Running as Root (VPS / Servers)
-
-Claude Code CLI blocks `--dangerously-skip-permissions` for root. `claude-tg` handles this automatically:
-
-- **Non-root** — uses `--dangerously-skip-permissions` as usual
-- **Root** — uses `--allowedTools` with dynamically discovered MCP servers (reads `~/.claude.json` and `.mcp.json`)
-
-All registered MCP servers and built-in tools are allowed automatically. No hardcoded server names.
-
-## Configuration
-
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | *required* | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | *required* | Your Telegram user ID |
-| `CLAUDE_WORK_DIR` | `cwd` | Working directory for Claude |
-| `CLAUDE_TG_VERBOSE` | `0` | Show tool results (`1` to enable) |
-| `CLAUDE_TG_MODEL` | — | Override Claude model |
-| `CLAUDE_TG_MAX_BUDGET` | — | Max budget in USD |
-| `CLAUDE_TG_SESSION_TIMEOUT` | `3600` | Auto-reset after N seconds of inactivity |
-| `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram message update interval (seconds) |
-| `GROQ_API_KEY` | — | Groq API key for voice transcription |
-| `CLAUDE_TG_TRIGGER_PORT` | — | Localhost port for external triggers (e.g. `9357`) |
-
-## Systemd (VPS deployment)
+## Running on a VPS
 
 ```bash
-# Install
 uv tool install claude-tg
+```
 
-# Create service
-cat > /etc/systemd/system/claude-tg.service << 'EOF'
+```ini
+# /etc/systemd/system/claude-tg.service
 [Unit]
 Description=Claude TG
 After=network-online.target
@@ -129,29 +101,53 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+```bash
 systemctl enable --now claude-tg
 ```
 
-## Features
+**Root handling**: Claude Code blocks `--dangerously-skip-permissions` for root. claude-tg detects this and switches to `--allowedTools` with auto-discovered MCP servers from `~/.claude.json` and `.mcp.json`.
 
-- Token-level streaming with adaptive rate limiting
-- Automatic message chaining for long outputs (splits at ~3800 chars)
-- Photo, file, and voice message support
-- Built-in MCP server for sending files back to the user
-- Inline cancel button on every message
-- Message queuing — send messages while Claude is working, they process after
-- Session auto-reset after inactivity
-- Compact tool call display with emoji icons
-- Root-compatible — auto-discovers and allows all MCP tools
-- Auto-registration of MCP server in Claude Code
-- In-place restart via `/restart` (no need to touch the server)
-- External triggers — cron/scripts can inject prompts via localhost HTTP
-- Direct message mode — send to Telegram without Claude processing (`DIRECT:` prefix)
+## Architecture
+
+```
+Telegram ←→ bot.py (python-telegram-bot)
+                ↕
+            runner.py (persistent subprocess)
+                ↕ stdin/stdout (NDJSON stream-json)
+            Claude Code CLI
+                ↕
+            MCP servers, tools, files
+```
+
+`runner.py` manages a single long-lived Claude process. Messages are written to stdin as `{"type":"user","message":{"role":"user","content":"..."}}`. Events are read from stdout line by line. When a turn completes (RESULT event), the process stays alive for the next turn.
+
+`stream.py` handles Telegram message updates — buffering tokens, splitting long messages into chains, rate-limiting edits to avoid Telegram API limits.
+
+`bot.py` orchestrates: debouncing rapid messages, injecting mid-turn, managing sessions, handling media and voice.
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | *required* | Bot token from @BotFather |
+| `TELEGRAM_CHAT_ID` | *required* | Your Telegram user ID |
+| `CLAUDE_WORK_DIR` | cwd | Working directory for Claude |
+| `CLAUDE_TG_MODEL` | — | Override Claude model |
+| `CLAUDE_TG_MAX_BUDGET` | — | Max budget in USD |
+| `CLAUDE_TG_TRIGGER_PORT` | — | Localhost port for triggers |
+| `CLAUDE_TG_VERBOSE` | `0` | Show tool results in chat |
+| `CLAUDE_TG_SESSION_TIMEOUT` | `3600` | Auto-reset after inactivity (seconds) |
+| `CLAUDE_TG_UPDATE_INTERVAL` | `2.0` | Telegram edit interval (seconds) |
+| `GROQ_API_KEY` | — | Groq key for voice transcription |
 
 ## Requirements
 
 - Python 3.11+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Telegram bot from [@BotFather](https://t.me/BotFather)
+
+## License
+
+MIT
