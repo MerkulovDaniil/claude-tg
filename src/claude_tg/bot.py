@@ -312,6 +312,18 @@ class ClaudeTelegramBot:
                         except Exception as e:
                             logger.error("Direct send failed: %s", e)
                 else:
+                    # Echo trigger prompt in chat so user sees same context as Claude
+                    try:
+                        MAX_ECHO = 4000
+                        echo = prompt if len(prompt) <= MAX_ECHO else prompt[:MAX_ECHO] + "…"
+                        await self._app.bot.send_message(
+                            chat_id=self.config.chat_id,
+                            text=f"📥 {echo}",
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logger.error("Trigger echo failed: %s", e)
+
                     # Inject into the normal message pipeline
                     ctx = type("_Ctx", (), {"bot": self._app.bot})()
                     self._buffer.append(prompt)
