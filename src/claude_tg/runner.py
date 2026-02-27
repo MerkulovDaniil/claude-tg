@@ -33,6 +33,22 @@ class RunnerEvent:
     cost_usd: float = 0.0
 
 
+# Queue sentinel types — signal EOF or errors from the background reader.
+
+
+@dataclass
+class _EOF:
+    """Process stdout closed."""
+    stderr: str = ""
+    returncode: int = 0
+
+
+@dataclass
+class _Error:
+    """Background reader crashed."""
+    message: str = ""
+
+
 class StreamParser:
     """Parse NDJSON stream events from Claude Code CLI."""
 
@@ -148,6 +164,9 @@ class ClaudeRunner:
     Uses --input-format stream-json to keep a single process alive across
     multiple conversation turns, eliminating per-turn startup overhead.
     New messages are written to stdin as NDJSON; events are read from stdout.
+
+    A background task continuously reads stdout into an asyncio.Queue,
+    preventing pipe buffer deadlocks when injected turns produce unread output.
     """
 
     def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None):
@@ -158,6 +177,8 @@ class ClaudeRunner:
         self.process: asyncio.subprocess.Process | None = None
         self.is_processing = False
         self._parser = StreamParser()
+        self._event_queue: asyncio.Queue[RunnerEvent | _EOF | _Error] = asyncio.Queue()
+        self._reader_task: asyncio.Task | None = None
 
     @property
     def process_alive(self) -> bool:
@@ -171,6 +192,22 @@ class ClaudeRunner:
         """Start Claude process if not already running."""
         if self.process_alive:
             return
+
+        # Clean up old reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
+
+        # Clear stale queue items from previous process
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
         cmd = [
             "claude",
@@ -204,6 +241,11 @@ class ClaudeRunner:
         )
         logger.info("Started Claude process pid=%s", self.process.pid)
 
+        # Start background stdout reader
+        self._reader_task = asyncio.create_task(
+            self._stdout_reader(), name=f"stdout-reader-{self.process.pid}"
+        )
+
     async def _send_stdin(self, text: str):
         """Write a user message to stdin as NDJSON."""
         if not self.process_alive or not self.process.stdin:
@@ -217,51 +259,97 @@ class ClaudeRunner:
         self.process.stdin.write(msg.encode())
         await self.process.stdin.drain()
 
-    async def _read_events(self) -> AsyncIterator[RunnerEvent]:
-        """Read and yield events from stdout until RESULT or EOF."""
+    async def _stdout_reader(self):
+        """Background task: continuously read stdout into _event_queue.
+
+        Runs for the entire lifetime of the subprocess. Ensures the pipe
+        is always being drained, preventing buffer-full deadlocks.
+        """
+        try:
+            while True:
+                line = await self.process.stdout.readline()
+                if not line:  # EOF — process exited
+                    await self.process.wait()
+                    stderr_text = ""
+                    if self.process.returncode and self.process.returncode != 0:
+                        try:
+                            stderr_bytes = await self.process.stderr.read()
+                            stderr_text = stderr_bytes.decode().strip()[:2000] if stderr_bytes else ""
+                        except Exception:
+                            pass
+                    await self._event_queue.put(
+                        _EOF(stderr=stderr_text, returncode=self.process.returncode or 0)
+                    )
+                    return
+
+                line_str = line.decode().strip()
+                if not line_str:
+                    continue
+
+                try:
+                    data = json.loads(line_str)
+                    event = self._parser.parse(data)
+                    if event:
+                        if event.session_id and event.type in (EventType.INIT, EventType.RESULT):
+                            self.session_id = event.session_id
+                        await self._event_queue.put(event)
+                except json.JSONDecodeError:
+                    await self._event_queue.put(
+                        RunnerEvent(type=EventType.TEXT_DELTA, text=line_str)
+                    )
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error("Background reader crashed: %s", e)
+            await self._event_queue.put(_Error(message=str(e)))
+
+    async def _read_until_result(self) -> AsyncIterator[RunnerEvent]:
+        """Yield events from the queue until RESULT or EOF/error sentinel."""
         while True:
-            line = await self.process.stdout.readline()
-            if not line:  # EOF — process exited
-                await self.process.wait()
-                if self.process.returncode and self.process.returncode != 0:
-                    stderr = await self.process.stderr.read()
-                    if stderr:
-                        yield RunnerEvent(
-                            type=EventType.TEXT_DELTA,
-                            text=f"\n❌ Error: {stderr.decode().strip()[:2000]}",
-                        )
+            try:
+                item = await asyncio.wait_for(self._event_queue.get(), timeout=300)
+            except asyncio.TimeoutError:
+                logger.error("Queue read timeout (5min) — forcing recovery")
+                yield RunnerEvent(
+                    type=EventType.TEXT_DELTA,
+                    text="\n❌ Timeout waiting for events",
+                )
                 return
 
-            line_str = line.decode().strip()
-            if not line_str:
-                continue
+            if isinstance(item, _EOF):
+                if item.stderr:
+                    yield RunnerEvent(
+                        type=EventType.TEXT_DELTA,
+                        text=f"\n❌ Error: {item.stderr}",
+                    )
+                return
 
-            try:
-                data = json.loads(line_str)
-                event = self._parser.parse(data)
-                if event:
-                    if event.session_id and event.type in (EventType.INIT, EventType.RESULT):
-                        self.session_id = event.session_id
-                    yield event
-                    if event.type == EventType.RESULT:
-                        return  # Turn done, process stays alive
-            except json.JSONDecodeError:
-                yield RunnerEvent(type=EventType.TEXT_DELTA, text=line_str)
+            if isinstance(item, _Error):
+                yield RunnerEvent(
+                    type=EventType.TEXT_DELTA,
+                    text=f"\n❌ Reader error: {item.message}",
+                )
+                return
+
+            yield item
+            if item.type == EventType.RESULT:
+                return
 
     async def _drain_pending(self):
-        """Drain any pending stdout events from prior injected turns."""
-        if not self.process_alive or not self.process.stdout:
-            return
-        while True:
+        """Drain any pending events from the queue (non-blocking)."""
+        drained = 0
+        while not self._event_queue.empty():
             try:
-                line = await asyncio.wait_for(
-                    self.process.stdout.readline(), timeout=0.1
-                )
-                if not line:
+                item = self._event_queue.get_nowait()
+                drained += 1
+                if isinstance(item, _EOF):
+                    # Don't lose EOF — put it back for _read_until_result
+                    await self._event_queue.put(item)
                     break
-                logger.debug("Drained pending event: %s", line[:100])
-            except asyncio.TimeoutError:
+            except asyncio.QueueEmpty:
                 break
+        if drained:
+            logger.debug("Drained %d pending queue items", drained)
 
     async def run(self, prompt: str) -> AsyncIterator[RunnerEvent]:
         """Send prompt and yield events until turn completes (RESULT).
@@ -274,7 +362,7 @@ class ClaudeRunner:
             await self._ensure_process()
             await self._drain_pending()
             await self._send_stdin(prompt)
-            async for event in self._read_events():
+            async for event in self._read_until_result():
                 yield event
 
         except (BrokenPipeError, ConnectionResetError) as e:
@@ -292,17 +380,29 @@ class ClaudeRunner:
         """Send a message to the running process mid-turn.
 
         The CLI queues it and processes after the current turn.
-        Call read_injected() to read the response events.
+        Orphaned turn events are safely consumed by the background
+        reader into the queue and drained on the next run() call.
         """
         if not self.process_alive:
             raise RuntimeError("Cannot inject: process not alive")
         await self._send_stdin(prompt)
         logger.info("Injected mid-turn message (%d chars)", len(prompt))
 
+    async def _cleanup_reader(self):
+        """Cancel and await the background reader task."""
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._reader_task = None
+
     async def cancel(self) -> None:
         """Kill the running process (hard stop)."""
         if not self.process:
             return
+        await self._cleanup_reader()
         try:
             self.process.send_signal(signal.SIGTERM)
             try:
@@ -335,5 +435,6 @@ class ClaudeRunner:
                 except ProcessLookupError:
                     pass
         finally:
+            await self._cleanup_reader()
             self.is_processing = False
             self.process = None
