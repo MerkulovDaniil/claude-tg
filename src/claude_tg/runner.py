@@ -1,10 +1,14 @@
-"""Claude Code CLI subprocess manager with stream-json parsing."""
+"""Claude Code CLI subprocess manager with persistent streaming process."""
 import asyncio
 import json
+import logging
+import os
 import signal
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 
 class EventType(Enum):
@@ -120,11 +124,9 @@ _BUILTIN_TOOLS = [
 
 def _discover_mcp_servers(work_dir: str) -> list[str]:
     """Read registered MCP server names from Claude config files."""
-    import os
     from pathlib import Path
 
     servers = set()
-    # Check both user-level and project-level MCP configs
     for path in [
         Path.home() / ".claude.json",
         Path(work_dir) / ".mcp.json",
@@ -141,7 +143,12 @@ def _discover_mcp_servers(work_dir: str) -> list[str]:
 
 
 class ClaudeRunner:
-    """Manages Claude Code CLI subprocess with streaming."""
+    """Manages a persistent Claude Code CLI subprocess with streaming I/O.
+
+    Uses --input-format stream-json to keep a single process alive across
+    multiple conversation turns, eliminating per-turn startup overhead.
+    New messages are written to stdin as NDJSON; events are read from stdout.
+    """
 
     def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None):
         self.work_dir = work_dir
@@ -149,30 +156,34 @@ class ClaudeRunner:
         self.max_budget = max_budget
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
-        self.is_running = False
+        self.is_processing = False
         self._parser = StreamParser()
+
+    @property
+    def process_alive(self) -> bool:
+        """True if the Claude subprocess is running."""
+        return self.process is not None and self.process.returncode is None
 
     def clear_session(self):
         self.session_id = None
 
-    async def run(self, prompt: str) -> AsyncIterator[RunnerEvent]:
-        """Run Claude Code and yield parsed events."""
-        self.is_running = True
+    async def _ensure_process(self):
+        """Start Claude process if not already running."""
+        if self.process_alive:
+            return
 
         cmd = [
             "claude",
-            "-p", prompt,
+            "-p",
             "--output-format", "stream-json",
+            "--input-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
         ]
 
-        import os
         if os.getuid() != 0:
             cmd.append("--dangerously-skip-permissions")
         else:
-            # Root can't use --dangerously-skip-permissions
-            # Discover MCP servers and allow all tools dynamically
             mcp_servers = _discover_mcp_servers(self.work_dir)
             cmd.extend(["--allowedTools"] + _BUILTIN_TOOLS + mcp_servers)
 
@@ -183,45 +194,113 @@ class ClaudeRunner:
         if self.max_budget:
             cmd.extend(["--max-budget-usd", str(self.max_budget)])
 
+        self.process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.work_dir,
+            limit=100 * 1024 * 1024,  # 100MB
+        )
+        logger.info("Started Claude process pid=%s", self.process.pid)
+
+    async def _send_stdin(self, text: str):
+        """Write a user message to stdin as NDJSON."""
+        if not self.process_alive or not self.process.stdin:
+            raise RuntimeError("Process not alive")
+
+        msg = json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": text}
+        }, ensure_ascii=False) + "\n"
+
+        self.process.stdin.write(msg.encode())
+        await self.process.stdin.drain()
+
+    async def _read_events(self) -> AsyncIterator[RunnerEvent]:
+        """Read and yield events from stdout until RESULT or EOF."""
+        while True:
+            line = await self.process.stdout.readline()
+            if not line:  # EOF — process exited
+                await self.process.wait()
+                if self.process.returncode and self.process.returncode != 0:
+                    stderr = await self.process.stderr.read()
+                    if stderr:
+                        yield RunnerEvent(
+                            type=EventType.TEXT_DELTA,
+                            text=f"\n❌ Error: {stderr.decode().strip()[:2000]}",
+                        )
+                return
+
+            line_str = line.decode().strip()
+            if not line_str:
+                continue
+
+            try:
+                data = json.loads(line_str)
+                event = self._parser.parse(data)
+                if event:
+                    if event.session_id and event.type in (EventType.INIT, EventType.RESULT):
+                        self.session_id = event.session_id
+                    yield event
+                    if event.type == EventType.RESULT:
+                        return  # Turn done, process stays alive
+            except json.JSONDecodeError:
+                yield RunnerEvent(type=EventType.TEXT_DELTA, text=line_str)
+
+    async def _drain_pending(self):
+        """Drain any pending stdout events from prior injected turns."""
+        if not self.process_alive or not self.process.stdout:
+            return
+        while True:
+            try:
+                line = await asyncio.wait_for(
+                    self.process.stdout.readline(), timeout=0.1
+                )
+                if not line:
+                    break
+                logger.debug("Drained pending event: %s", line[:100])
+            except asyncio.TimeoutError:
+                break
+
+    async def run(self, prompt: str) -> AsyncIterator[RunnerEvent]:
+        """Send prompt and yield events until turn completes (RESULT).
+
+        The process is kept alive after RESULT for subsequent calls.
+        If the process died, a new one is started automatically.
+        Caller manages is_processing flag.
+        """
         try:
-            self.process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.work_dir,
-                limit=100 * 1024 * 1024,  # 100MB
+            await self._ensure_process()
+            await self._drain_pending()
+            await self._send_stdin(prompt)
+            async for event in self._read_events():
+                yield event
+
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.error("Process pipe error: %s", e)
+            yield RunnerEvent(
+                type=EventType.TEXT_DELTA,
+                text=f"\n❌ Process error: {e}",
             )
 
-            async for line in self.process.stdout:
-                line_str = line.decode().strip()
-                if not line_str:
-                    continue
-                try:
-                    data = json.loads(line_str)
-                    event = self._parser.parse(data)
-                    if event:
-                        # Capture session_id from init or result
-                        if event.session_id and event.type in (EventType.INIT, EventType.RESULT):
-                            self.session_id = event.session_id
-                        yield event
-                except json.JSONDecodeError:
-                    yield RunnerEvent(type=EventType.TEXT_DELTA, text=line_str)
-
-            await self.process.wait()
-
-            if self.process.returncode and self.process.returncode != 0:
-                stderr = await self.process.stderr.read()
-                if stderr:
-                    yield RunnerEvent(
-                        type=EventType.TEXT_DELTA,
-                        text=f"\n❌ Error: {stderr.decode().strip()}",
-                    )
         finally:
-            self.is_running = False
-            self.process = None
+            if not self.process_alive:
+                self.process = None
+
+    async def inject(self, prompt: str) -> None:
+        """Send a message to the running process mid-turn.
+
+        The CLI queues it and processes after the current turn.
+        Call read_injected() to read the response events.
+        """
+        if not self.process_alive:
+            raise RuntimeError("Cannot inject: process not alive")
+        await self._send_stdin(prompt)
+        logger.info("Injected mid-turn message (%d chars)", len(prompt))
 
     async def cancel(self) -> None:
-        """Cancel the running process."""
+        """Kill the running process (hard stop)."""
         if not self.process:
             return
         try:
@@ -234,5 +313,27 @@ class ClaudeRunner:
         except ProcessLookupError:
             pass
         finally:
-            self.is_running = False
+            self.is_processing = False
+            self.process = None
+
+    async def stop(self) -> None:
+        """Gracefully stop the process by closing stdin."""
+        if not self.process_alive:
+            self.process = None
+            return
+        try:
+            self.process.stdin.close()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+        except Exception:
+            if self.process:
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
+        finally:
+            self.is_processing = False
             self.process = None

@@ -52,16 +52,20 @@ class ClaudeTelegramBot:
         self._debounce_timeout = 0.5
         self._pending_context: ContextTypes.DEFAULT_TYPE | None = None
 
+        # Mid-turn injection state
+        self._inject_task: asyncio.Task | None = None
+
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
 
-    def _check_session_timeout(self):
+    async def _check_session_timeout(self):
         """Auto-reset session if inactive too long."""
         if (
             self.runner.session_id
             and time.time() - self._last_activity > self.config.session_timeout
         ):
             logger.info("Session timed out, resetting")
+            await self.runner.stop()
             self.runner.clear_session()
             self.media.cleanup()
             self._session_cost = 0.0
@@ -74,6 +78,7 @@ class ClaudeTelegramBot:
     async def cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
+        await self.runner.stop()
         self.runner.clear_session()
         self.media.cleanup()
         self._session_cost = 0.0
@@ -82,7 +87,7 @@ class ClaudeTelegramBot:
     async def cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        if self.runner.is_running:
+        if self.runner.is_processing:
             await update.message.reply_text("⚠️ Claude is busy. Use /cancel first.")
             return
         self._buffer.append("/compact")
@@ -98,7 +103,7 @@ class ClaudeTelegramBot:
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        if not self.runner.is_running:
+        if not self.runner.is_processing:
             await update.message.reply_text("Nothing running.")
             return
         await self.runner.cancel()
@@ -115,16 +120,26 @@ class ClaudeTelegramBot:
             await update.message.reply_text(f"Current model: {current}\nUsage: /model <name>")
             return
         self.runner.model = context.args[0]
+        # Stop process so next run() starts with the new model
+        if self.runner.is_processing:
+            await self.runner.cancel()
+            if self._stream:
+                await self._stream.finalize(cancelled=True)
+                self._stream = None
+        elif self.runner.process_alive:
+            await self.runner.stop()
         await update.message.reply_text(f"Model set to: {self.runner.model}")
 
     async def cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        if self.runner.is_running:
+        if self.runner.is_processing:
             await self.runner.cancel()
             if self._stream:
                 await self._stream.finalize(cancelled=True)
                 self._stream = None
+        elif self.runner.process_alive:
+            await self.runner.stop()
         await update.message.reply_text("🔄 Restarting bot...")
         os.environ["_CLAUDE_TG_RESTARTED"] = "1"
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -137,7 +152,7 @@ class ClaudeTelegramBot:
         if query.from_user.id != self.config.chat_id:
             return
         if query.data == "claude_cancel":
-            if not self.runner.is_running:
+            if not self.runner.is_processing:
                 await query.edit_message_text("Nothing running.")
                 return
             await self.runner.cancel()
@@ -189,9 +204,23 @@ class ClaudeTelegramBot:
             await update.message.reply_text(f"🎤 Transcription error: {str(e)[:200]}")
 
     async def _schedule_debounce(self, context: ContextTypes.DEFAULT_TYPE):
-        # While Claude is running, just buffer messages — they'll be processed after
-        if self.runner.is_running:
+        if self.runner.is_processing:
             self._pending_context = context
+
+            # If process alive, inject mid-turn via stdin instead of just buffering
+            if self.runner.process_alive:
+                if self._inject_task:
+                    self._inject_task.cancel()
+                    try:
+                        await self._inject_task
+                    except asyncio.CancelledError:
+                        pass
+
+                async def _fire_inject():
+                    await asyncio.sleep(self._debounce_timeout)
+                    await self._inject_mid_turn()
+
+                self._inject_task = asyncio.create_task(_fire_inject())
             return
 
         if self._debounce_task:
@@ -207,6 +236,66 @@ class ClaudeTelegramBot:
 
         self._debounce_task = asyncio.create_task(_fire())
 
+    async def _inject_mid_turn(self):
+        """Send buffered messages to running process via stdin."""
+        text = "\n".join(self._buffer)
+        photos = list(self._buffer_photos)
+        docs = list(self._buffer_docs)
+        self._buffer.clear()
+        self._buffer_photos.clear()
+        self._buffer_docs.clear()
+
+        if not text and not photos and not docs:
+            return
+
+        prompt = self.media.build_prompt(text, photos, docs)
+        self.conversation_log.log_user(text)
+
+        try:
+            await self.runner.inject(prompt)
+        except RuntimeError:
+            # Process died — re-buffer for normal flow
+            if text:
+                self._buffer.append(text)
+            self._buffer_photos.extend(photos)
+            self._buffer_docs.extend(docs)
+            logger.warning("Mid-turn inject failed, re-buffered")
+
+    async def _stream_turn(self, events, stream) -> bool:
+        """Stream events from a single turn to Telegram. Returns True if RESULT received."""
+        response_text = []
+        async for event in events:
+            if event.type == EventType.TEXT_DELTA:
+                await stream.push_text(event.text)
+                response_text.append(event.text)
+            elif event.type == EventType.TOOL_USE:
+                line = format_tool_call(event.tool_name, event.tool_input)
+                await stream.push_tool_call(line)
+            elif event.type == EventType.TOOL_RESULT and self.config.verbose:
+                html = format_tool_result(event.text)
+                await stream.push_tool_result(html)
+            elif event.type == EventType.RESULT:
+                self._session_cost += event.cost_usd
+                duration = event.duration_ms // 1000
+                footer = f"⏱ {duration}s · {event.num_turns} turns"
+                await stream.finalize(footer=footer)
+                self.conversation_log.log_assistant("".join(response_text))
+                return True
+        # EOF without RESULT — process died
+        self.conversation_log.log_assistant("".join(response_text))
+        return False
+
+    def _new_stream(self, context) -> TelegramStream:
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛑 Cancel", callback_data="claude_cancel")]]
+        )
+        return TelegramStream(
+            bot=context.bot,
+            chat_id=self.config.chat_id,
+            update_interval=self.config.update_interval,
+            reply_markup=keyboard,
+        )
+
     async def _process_buffer(self, context: ContextTypes.DEFAULT_TYPE):
         """Process accumulated buffer."""
         text = "\n".join(self._buffer)
@@ -219,57 +308,27 @@ class ClaudeTelegramBot:
         if not text and not photos and not docs:
             return
 
-        self._check_session_timeout()
+        # Mark processing IMMEDIATELY — before any await — so triggers/messages
+        # arriving during _check_session_timeout() or stream.start() are injected
+        # instead of spawning a concurrent _process_buffer()
+        self.runner.is_processing = True
+
+        await self._check_session_timeout()
+        # Re-assert: _check_session_timeout may call stop() which clears the flag
+        self.runner.is_processing = True
         self._touch_activity()
 
-        # Build prompt with media references
         prompt = self.media.build_prompt(text, photos, docs)
-
-        # Log user message
         self.conversation_log.log_user(text)
 
-        # Create cancel button
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🛑 Cancel", callback_data="claude_cancel")]]
-        )
-
-        # Start streaming
-        stream = TelegramStream(
-            bot=context.bot,
-            chat_id=self.config.chat_id,
-            update_interval=self.config.update_interval,
-            reply_markup=keyboard,
-        )
+        stream = self._new_stream(context)
         self._stream = stream
         await stream.start()
 
-        response_text = []
         try:
-            async for event in self.runner.run(prompt):
-                if event.type == EventType.TEXT_DELTA:
-                    await stream.push_text(event.text)
-                    response_text.append(event.text)
-
-                elif event.type == EventType.TOOL_USE:
-                    line = format_tool_call(event.tool_name, event.tool_input)
-                    await stream.push_tool_call(line)
-
-                elif event.type == EventType.TOOL_RESULT and self.config.verbose:
-                    html = format_tool_result(event.text)
-                    await stream.push_tool_result(html)
-
-                elif event.type == EventType.RESULT:
-                    self._session_cost += event.cost_usd
-                    duration = event.duration_ms // 1000
-                    footer = f"⏱ {duration}s · {event.num_turns} turns"
-                    await stream.finalize(footer=footer)
-                    # Log assistant response
-                    self.conversation_log.log_assistant("".join(response_text))
-
-            # If no RESULT event came (shouldn't happen, but safety)
-            if self.runner.is_running is False and stream == self._stream:
+            got_result = await self._stream_turn(self.runner.run(prompt), stream)
+            if not got_result:
                 await stream.finalize()
-                self.conversation_log.log_assistant("".join(response_text))
 
         except Exception as e:
             logger.exception("Error running Claude")
@@ -280,8 +339,9 @@ class ClaudeTelegramBot:
                     self.config.chat_id, f"❌ Error: {str(e)[:4000]}"
                 )
         finally:
+            self.runner.is_processing = False
             self._stream = None
-            # Process messages that arrived while Claude was running
+            # Process messages that arrived but weren't injected
             if self._buffer or self._buffer_photos or self._buffer_docs:
                 ctx = self._pending_context or context
                 self._pending_context = None
@@ -325,18 +385,6 @@ class ClaudeTelegramBot:
                 else:
                     # Log trigger prompt
                     self.conversation_log.log_trigger(prompt)
-
-                    # Echo trigger prompt in chat so user sees same context as Claude
-                    try:
-                        MAX_ECHO = 4000
-                        echo = prompt if len(prompt) <= MAX_ECHO else prompt[:MAX_ECHO] + "…"
-                        await self._app.bot.send_message(
-                            chat_id=self.config.chat_id,
-                            text=f"📥 {echo}",
-                            disable_web_page_preview=True,
-                        )
-                    except Exception as e:
-                        logger.error("Trigger echo failed: %s", e)
 
                     # Inject into the normal message pipeline
                     ctx = type("_Ctx", (), {"bot": self._app.bot})()

@@ -126,9 +126,18 @@ class TelegramStream:
                 self.chain._current = "🛑 Cancelled\n\n" + self.chain._current
             if footer:
                 self.chain.set_footer(footer)
+
+            has_content = bool(self.chain._current.strip() or self.chain._chunks)
             display = self.chain.render()
-            if display.strip() and self._current_msg:
+
+            if has_content and display.strip() and self._current_msg:
                 await self._edit_message(self._current_msg, display, reply_markup=None)
+            elif self._current_msg:
+                # No real content (footer-only or empty) — delete placeholder
+                try:
+                    await self._current_msg.delete()
+                except Exception:
+                    pass
 
     async def _edit_message(self, msg: Message, text: str, reply_markup: InlineKeyboardMarkup | None):
         try:
