@@ -307,12 +307,14 @@ class ClaudeRunner:
         """Yield events from the queue until RESULT or EOF/error sentinel."""
         while True:
             try:
-                item = await asyncio.wait_for(self._event_queue.get(), timeout=300)
+                item = await asyncio.wait_for(self._event_queue.get(), timeout=30)
             except asyncio.TimeoutError:
-                logger.error("Queue read timeout (5min) — forcing recovery")
+                if self.process_alive:
+                    continue  # Process running — tool may be blocking stdout
+                logger.error("Process dead and queue empty — ending turn")
                 yield RunnerEvent(
                     type=EventType.TEXT_DELTA,
-                    text="\n❌ Timeout waiting for events",
+                    text="\n❌ Process exited unexpectedly",
                 )
                 return
 
