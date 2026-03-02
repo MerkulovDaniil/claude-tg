@@ -55,6 +55,9 @@ class ClaudeTelegramBot:
         # Mid-turn injection state
         self._inject_task: asyncio.Task | None = None
 
+        # Custom commands from commands/ directory
+        self._custom_commands: dict[str, str] = self._discover_custom_commands()
+
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
 
@@ -143,6 +146,73 @@ class ClaudeTelegramBot:
         await update.message.reply_text("🔄 Restarting bot...")
         os.environ["_CLAUDE_TG_RESTARTED"] = "1"
         os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # --- Custom commands (from {work_dir}/commands/ directory) ---
+
+    async def _handle_custom_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run a script from commands/ directory and send output to Telegram."""
+        if not self._is_authorized(update):
+            return
+
+        cmd = update.message.text.split()[0].lstrip("/")
+        args = update.message.text.split()[1:]
+        script = self._custom_commands.get(cmd)
+        if not script:
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                script, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.config.work_dir,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            await update.message.reply_text(f"⏱ /{cmd} timed out (30s)")
+            return
+        except Exception as e:
+            await update.message.reply_text(f"❌ /{cmd} error: {str(e)[:200]}")
+            return
+
+        output = stdout.decode(errors="replace")
+        lines = output.split("\n")
+        text_lines = []
+        photos = []
+
+        for line in lines:
+            if line.startswith("PHOTO:"):
+                photos.append(line[6:].strip())
+            else:
+                text_lines.append(line)
+
+        text = "\n".join(text_lines).strip()
+        if text:
+            # Split into 4096-char chunks for Telegram limit
+            for i in range(0, len(text), 4096):
+                await update.message.reply_text(text[i : i + 4096])
+
+        for photo_path in photos:
+            if os.path.isfile(photo_path):
+                with open(photo_path, "rb") as f:
+                    await update.message.reply_photo(photo=f)
+
+    def _discover_custom_commands(self) -> dict[str, str]:
+        """Scan {work_dir}/commands/ for executable scripts."""
+        cmd_dir = os.path.join(self.config.work_dir, "commands")
+        commands = {}
+        if not os.path.isdir(cmd_dir):
+            return commands
+        for entry in sorted(os.listdir(cmd_dir)):
+            path = os.path.join(cmd_dir, entry)
+            if not os.path.isfile(path) or not os.access(path, os.X_OK):
+                continue
+            name = entry.split(".")[0]
+            if name and name not in commands:
+                commands[name] = path
+        if commands:
+            logger.info("Custom commands: %s", ", ".join(f"/{k}" for k in commands))
+        return commands
 
     # --- Cancel callback ---
 
@@ -420,6 +490,10 @@ class ClaudeTelegramBot:
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("model", self.cmd_model))
         app.add_handler(CommandHandler("restart", self.cmd_restart))
+
+        # Custom commands (auto-discovered from {work_dir}/commands/)
+        for name in self._custom_commands:
+            app.add_handler(CommandHandler(name, self._handle_custom_command))
 
         # Callbacks
         app.add_handler(
