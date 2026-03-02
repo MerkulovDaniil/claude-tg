@@ -400,6 +400,18 @@ class ClaudeTelegramBot:
             if not got_result:
                 await stream.finalize()
 
+            # Stream any additional turns from mid-turn injections
+            while got_result and self.runner.has_pending_events():
+                logger.info("Streaming pending turn from mid-turn injection")
+                stream = self._new_stream(context)
+                self._stream = stream
+                await stream.start()
+                got_result = await self._stream_turn(
+                    self.runner.read_pending_turn(), stream
+                )
+                if not got_result:
+                    await stream.finalize()
+
         except Exception as e:
             logger.exception("Error running Claude")
             try:

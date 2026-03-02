@@ -353,6 +353,15 @@ class ClaudeRunner:
         if drained:
             logger.debug("Drained %d pending queue items", drained)
 
+    def has_pending_events(self) -> bool:
+        """Check if there are pending events in the queue (from mid-turn injections)."""
+        return not self._event_queue.empty()
+
+    async def read_pending_turn(self) -> AsyncIterator[RunnerEvent]:
+        """Yield events from a pending turn (injected mid-turn). Reads until RESULT or empty."""
+        async for event in self._read_until_result():
+            yield event
+
     async def run(self, prompt: str) -> AsyncIterator[RunnerEvent]:
         """Send prompt and yield events until turn completes (RESULT).
 
