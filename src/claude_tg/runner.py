@@ -271,12 +271,12 @@ class ClaudeRunner:
                 if not line:  # EOF — process exited
                     await self.process.wait()
                     stderr_text = ""
-                    if self.process.returncode and self.process.returncode != 0:
-                        try:
-                            stderr_bytes = await self.process.stderr.read()
-                            stderr_text = stderr_bytes.decode().strip()[:2000] if stderr_bytes else ""
-                        except Exception:
-                            pass
+                    # Always read stderr — CLI may write errors even with rc=0
+                    try:
+                        stderr_bytes = await self.process.stderr.read()
+                        stderr_text = stderr_bytes.decode().strip()[:2000] if stderr_bytes else ""
+                    except Exception:
+                        pass
                     await self._event_queue.put(
                         _EOF(stderr=stderr_text, returncode=self.process.returncode or 0)
                     )
@@ -323,6 +323,15 @@ class ClaudeRunner:
                     yield RunnerEvent(
                         type=EventType.TEXT_DELTA,
                         text=f"\n❌ Error: {item.stderr}",
+                    )
+                else:
+                    # Process exited without output — never leave the user
+                    # staring at a "Thinking..." placeholder that silently vanishes
+                    rc = item.returncode
+                    logger.error("Process EOF with no output (rc=%d)", rc)
+                    yield RunnerEvent(
+                        type=EventType.TEXT_DELTA,
+                        text=f"\n❌ Process exited without response (rc={rc})",
                     )
                 return
 
