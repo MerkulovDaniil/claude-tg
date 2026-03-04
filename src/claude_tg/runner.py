@@ -31,6 +31,7 @@ class RunnerEvent:
     duration_ms: int = 0
     num_turns: int = 0
     cost_usd: float = 0.0
+    context_pct: float | None = None
 
 
 # Queue sentinel types — signal EOF or errors from the background reader.
@@ -51,6 +52,10 @@ class _Error:
 
 class StreamParser:
     """Parse NDJSON stream events from Claude Code CLI."""
+
+    def __init__(self):
+        self._last_turn_input: int = 0  # Track last turn's input tokens
+        self._context_window: int = 200_000  # Updated from modelUsage when available
 
     def parse(self, data: dict) -> RunnerEvent | None:
         event_type = data.get("type")
@@ -98,7 +103,18 @@ class StreamParser:
         return None
 
     def _parse_assistant(self, data: dict) -> RunnerEvent | None:
-        content = data.get("message", {}).get("content", [])
+        # Track per-turn input tokens from assistant message usage
+        msg = data.get("message", {})
+        usage = msg.get("usage", {})
+        turn_input = (
+            (usage.get("input_tokens") or 0)
+            + (usage.get("cache_read_input_tokens") or 0)
+            + (usage.get("cache_creation_input_tokens") or 0)
+        )
+        if turn_input > 0:
+            self._last_turn_input = turn_input
+
+        content = msg.get("content", [])
         for block in content:
             if block.get("type") == "tool_use":
                 return RunnerEvent(
@@ -121,6 +137,38 @@ class StreamParser:
         return None
 
     def _parse_result(self, data: dict) -> RunnerEvent:
+        # Compute context usage percentage.
+        # Prefer last turn's actual input tokens (from assistant messages).
+        # Fall back to averaging cumulative usage across turns.
+        used_pct = None
+
+        # Get context window from modelUsage; remember across calls
+        model_usage = data.get("modelUsage") or {}
+        for model_info in model_usage.values():
+            if isinstance(model_info, dict) and model_info.get("contextWindow"):
+                self._context_window = model_info["contextWindow"]
+                break
+        max_ctx = self._context_window
+
+        # Prefer per-turn tracking (accurate), fall back to averaging (approximate)
+        context_tokens = self._last_turn_input
+        if not context_tokens:
+            usage = data.get("usage") or {}
+            num_turns = data.get("num_turns") or 1
+            total_input = (
+                (usage.get("input_tokens") or 0)
+                + (usage.get("cache_read_input_tokens") or 0)
+                + (usage.get("cache_creation_input_tokens") or 0)
+            )
+            if total_input > 0 and num_turns > 0:
+                context_tokens = total_input // num_turns
+
+        if context_tokens > 0:
+            used_pct = min(round(context_tokens / max_ctx * 100), 100.0)
+
+        # Reset for next execution
+        self._last_turn_input = 0
+
         return RunnerEvent(
             type=EventType.RESULT,
             session_id=data.get("session_id", ""),
@@ -128,6 +176,7 @@ class StreamParser:
             num_turns=data.get("num_turns", 0),
             cost_usd=data.get("total_cost_usd", 0.0),
             text=data.get("result", ""),
+            context_pct=used_pct,
         )
 
 

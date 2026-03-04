@@ -347,7 +347,8 @@ class ClaudeTelegramBot:
             elif event.type == EventType.RESULT:
                 self._session_cost += event.cost_usd
                 duration = event.duration_ms // 1000
-                footer = f"⏱ {duration}s · {event.num_turns} turns"
+                ctx_str = f" · ctx {event.context_pct:.0f}%" if event.context_pct is not None else ""
+                footer = f"⏱ {duration}s · {event.num_turns} turns{ctx_str}"
                 await stream.finalize(footer=footer)
                 self.conversation_log.log_assistant("".join(response_text))
                 return True
