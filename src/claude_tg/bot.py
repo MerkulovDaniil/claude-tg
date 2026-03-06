@@ -21,6 +21,7 @@ from .stream import TelegramStream
 from .media import MediaHandler
 from .formatter import format_tool_call, format_tool_result
 from .conversation_log import ConversationLog
+from .review import ReviewHandler
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,13 @@ class ClaudeTelegramBot:
 
         # Mid-turn injection state
         self._inject_task: asyncio.Task | None = None
+        self._pending_injections: int = 0
 
         # Custom commands from commands/ directory
         self._custom_commands: dict[str, str] = self._discover_custom_commands()
+
+        # Review system
+        self.review = ReviewHandler(config.work_dir, config.chat_id)
 
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
@@ -72,6 +77,7 @@ class ClaudeTelegramBot:
             self.runner.clear_session()
             self.media.cleanup()
             self._session_cost = 0.0
+            self._pending_injections = 0
 
     def _touch_activity(self):
         self._last_activity = time.time()
@@ -85,6 +91,7 @@ class ClaudeTelegramBot:
         self.runner.clear_session()
         self.media.cleanup()
         self._session_cost = 0.0
+        self._pending_injections = 0
         await update.message.reply_text("🆕 Session cleared.")
 
     async def cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,6 +330,7 @@ class ClaudeTelegramBot:
 
         try:
             await self.runner.inject(prompt)
+            self._pending_injections += 1
         except RuntimeError:
             # Process died — re-buffer for normal flow
             if text:
@@ -402,8 +410,20 @@ class ClaudeTelegramBot:
                 await stream.finalize()
 
             # Stream any additional turns from mid-turn injections
-            while got_result and self.runner.has_pending_events():
+            while got_result and (self._pending_injections > 0 or self.runner.has_pending_events()):
+                # Wait for events to arrive from injected turn
+                if not self.runner.has_pending_events():
+                    logger.info("Waiting for injected turn events...")
+                    for _ in range(100):  # up to 10 seconds
+                        await asyncio.sleep(0.1)
+                        if self.runner.has_pending_events():
+                            break
+                    else:
+                        logger.warning("Timeout waiting for injected turn events")
+                        self._pending_injections = 0
+                        break
                 logger.info("Streaming pending turn from mid-turn injection")
+                self._pending_injections = max(0, self._pending_injections - 1)
                 stream = self._new_stream(context)
                 self._stream = stream
                 await stream.start()
@@ -489,6 +509,21 @@ class ClaudeTelegramBot:
 
         async def _post_init(app: Application):
             self._app = app
+            # Register bot commands menu
+            commands = [
+                ("clear", "Новая сессия"),
+                ("compact", "Сжать контекст"),
+                ("cancel", "Отменить текущую задачу"),
+                ("cost", "Стоимость сессии"),
+                ("model", "Сменить модель"),
+                ("restart", "Перезапуск"),
+                ("review", "Ревью контента"),
+            ]
+            # Add custom commands
+            for name in self._custom_commands:
+                commands.append((name, f"/{name}"))
+            from telegram import BotCommand
+            await app.bot.set_my_commands([BotCommand(c, d) for c, d in commands])
             if os.environ.pop("_CLAUDE_TG_RESTARTED", None):
                 await app.bot.send_message(self.config.chat_id, "✅ Restart complete.")
             if trigger_port:
@@ -507,6 +542,14 @@ class ClaudeTelegramBot:
         # Custom commands (auto-discovered from {work_dir}/commands/)
         for name in self._custom_commands:
             app.add_handler(CommandHandler(name, self._handle_custom_command))
+
+        # Review
+        app.add_handler(CommandHandler("review", self.review.cmd_review))
+        app.add_handler(MessageHandler(
+            filters.Regex(r"^/review_\S+") & filters.ChatType.PRIVATE,
+            self.review.cmd_review_item,
+        ))
+        app.add_handler(CallbackQueryHandler(self.review.handle_callback, pattern=r"^rv:"))
 
         # Callbacks
         app.add_handler(
