@@ -61,7 +61,7 @@ class ClaudeTelegramBot:
         self._custom_commands: dict[str, str] = self._discover_custom_commands()
 
         # Review system
-        self.review = ReviewHandler(config.work_dir, config.chat_id)
+        self.review = ReviewHandler(config.work_dir, config.chat_id, self.conversation_log)
 
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
@@ -81,6 +81,33 @@ class ClaudeTelegramBot:
 
     def _touch_activity(self):
         self._last_activity = time.time()
+
+    def _get_unseen_bus_messages(self) -> str:
+        """Read the message bus for anything Claude hasn't seen.
+
+        conversation_log is the single source of truth (bus) for all messages
+        in the TG chat. Claude's session only sees user/assistant turns that go
+        through it. Everything else (DIRECT, review, triggers) bypasses Claude
+        but IS on the bus. This method reads the bus and returns unseen messages
+        so Claude has the same view as the user.
+        """
+        entries = self.conversation_log.get_recent(limit=50)
+        unseen = []
+        for entry in reversed(entries):
+            role = entry.get("role", "")
+            if role == "assistant":
+                break  # last Claude response = sync point
+            if role in ("direct", "review"):
+                unseen.append(entry)
+        if not unseen:
+            return ""
+        unseen.reverse()
+        prefix_map = {"direct": "📢", "review": "📋"}
+        lines = []
+        for e in unseen:
+            p = prefix_map.get(e["role"], "•")
+            lines.append(f"{p} {e.get('text', '')}")
+        return "[Messages sent to TG since your last response]\n" + "\n".join(lines)
 
     # --- Commands ---
 
@@ -396,6 +423,11 @@ class ClaudeTelegramBot:
         # Re-assert: _check_session_timeout may call stop() which clears the flag
         self.runner.is_processing = True
         self._touch_activity()
+
+        # Sync from message bus: inject messages Claude hasn't seen
+        bus_context = self._get_unseen_bus_messages()
+        if bus_context:
+            text = bus_context + "\n\n" + text
 
         prompt = self.media.build_prompt(text, photos, docs)
         self.conversation_log.log_user(text)

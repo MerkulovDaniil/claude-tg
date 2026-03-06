@@ -46,6 +46,11 @@ class ConversationLog:
             entry["source"] = source
         self._write(entry)
 
+    def log_review(self, text: str):
+        """Review system message (sent to TG bypassing Claude)."""
+        if text.strip():
+            self._write({"role": "review", "text": text})
+
     def get_recent(self, limit: int = 50, max_chars: int = 30000) -> list[dict]:
         """Read recent entries, respecting both count and size limits."""
         if not self.path.exists():
@@ -105,7 +110,7 @@ class ConversationLog:
             if len(text) > 500:
                 text = text[:500] + "…"
 
-            prefix = {"user": "👤", "assistant": "🤖", "trigger": "📥", "direct": "📢"}.get(role, "?")
+            prefix = {"user": "👤", "assistant": "🤖", "trigger": "📥", "direct": "📢", "review": "📋"}.get(role, "?")
             source = e.get("source", "")
             source_tag = f" [{source}]" if source else ""
             lines.append(f"[{time_str}] {prefix}{source_tag} {text}")

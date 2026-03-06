@@ -307,9 +307,10 @@ def _move_artifact(artifact: Artifact, dest_dir: str):
 class ReviewHandler:
     """Handles /review command and inline button callbacks."""
 
-    def __init__(self, work_dir: str, chat_id: int):
+    def __init__(self, work_dir: str, chat_id: int, conversation_log=None):
         self.work_dir = work_dir
         self.chat_id = chat_id
+        self._conversation_log = conversation_log
         self._config_path = os.path.join(work_dir, "review_sources.json")
         self._state_path = os.path.join(work_dir, "data", "review_state.json")
         self._session: ReviewSession | None = None
@@ -378,7 +379,7 @@ class ReviewHandler:
         # Multiple sources — show picker
         total_count = sum(c for _, c in available)
         buttons = [
-            [InlineKeyboardButton(f"🔴 По приоритету ({total_count})", callback_data=f"{CB_PREFIX}src:_priority")]
+            [InlineKeyboardButton(f"⭐ По приоритету ({total_count})", callback_data=f"{CB_PREFIX}src:_priority")]
         ]
         for source, count in available:
             buttons.append(
@@ -445,7 +446,7 @@ class ReviewHandler:
                 session.build_mixed_queue(sources)
                 self._save_session()
                 await query.edit_message_text(
-                    f"🔴 <b>По приоритету</b> — {session.remaining} items",
+                    f"⭐ <b>По приоритету</b> — {session.remaining} items",
                     parse_mode=ParseMode.HTML,
                 )
                 await self._send_current(context.bot, chat_id)
@@ -565,7 +566,7 @@ class ReviewHandler:
         total = len(session.queue)
         caption_body = artifact.read_caption(max_len=800)
         prio = artifact.meta.get("priority", 3)
-        prio_badge = {1: "🔴", 2: "🟡", 3: "⚪"}.get(prio, "⚪")
+        prio_badge = {1: "⭐", 2: "🔹", 3: "⚪"}.get(prio, "⚪")
         source_tag = f"  <i>{source.name}</i>" if session.mixed else ""
         header = f"{prio_badge} [{pos}/{total}]  <b>{artifact.title}</b>{source_tag}\n\n"
         caption = header + caption_body
@@ -596,9 +597,12 @@ class ReviewHandler:
         if attached_file and not os.path.isfile(attached_file):
             attached_file = None
 
+        sent_text = caption  # track what was sent for conversation log
+
         if source.preview == "video" and "video" in artifact.files:
             if len(caption) > 1024:
                 caption = caption[:1020] + "..."
+            sent_text = caption
             with open(artifact.files["video"], "rb") as f:
                 await bot.send_video(
                     chat_id=chat_id,
@@ -613,6 +617,7 @@ class ReviewHandler:
             short_caption = header + artifact.read_caption(max_len=400)
             if len(short_caption) > 1024:
                 short_caption = short_caption[:1020] + "..."
+            sent_text = short_caption + f"\n[file: {os.path.basename(attached_file)}]"
             with open(attached_file, "rb") as f:
                 await bot.send_document(
                     chat_id=chat_id,
@@ -624,6 +629,7 @@ class ReviewHandler:
         elif source.preview == "document" and "document" in artifact.files:
             if len(caption) > 1024:
                 caption = caption[:1020] + "..."
+            sent_text = caption
             with open(artifact.files["document"], "rb") as f:
                 await bot.send_document(
                     chat_id=chat_id,
@@ -640,6 +646,7 @@ class ReviewHandler:
                 short_caption = header + artifact.read_caption(max_len=400)
                 if len(short_caption) > 1024:
                     short_caption = short_caption[:1020] + "..."
+                sent_text = short_caption
                 with open(text_path, "rb") as f:
                     await bot.send_document(
                         chat_id=chat_id,
@@ -651,12 +658,19 @@ class ReviewHandler:
             else:
                 if len(caption) > 4000:
                     caption = caption[:4000] + "..."
+                sent_text = caption
                 await bot.send_message(
                     chat_id=chat_id,
                     text=caption,
                     parse_mode=ParseMode.HTML,
                     reply_markup=keyboard,
                 )
+
+        # Log to message bus so Claude sees review messages
+        if self._conversation_log:
+            import re
+            clean = re.sub(r"<[^>]+>", "", sent_text)
+            self._conversation_log.log_review(clean)
 
     def _format_stats(self, session: ReviewSession) -> str:
         source_decisions = session.decisions.get(session.source_id, {})
