@@ -213,7 +213,10 @@ class ReviewSession:
     def build_queue(self, source: ReviewSource):
         self.source_id = source.id
         decided = set(self.decisions.get(source.id, {}).keys())
-        self.queue = [a.slug for a in source.discover() if a.slug not in decided]
+        pending = [a for a in source.discover() if a.slug not in decided]
+        # Sort by priority (lower = more urgent, default 3)
+        pending.sort(key=lambda a: a.meta.get("priority", 3))
+        self.queue = [a.slug for a in pending]
         self.current_index = 0
 
     @property
@@ -503,7 +506,9 @@ class ReviewHandler:
         pos = session.current_index + 1
         total = len(session.queue)
         caption_body = artifact.read_caption(max_len=800)
-        header = f"📋 [{pos}/{total}]  <b>{artifact.title}</b>\n\n"
+        prio = artifact.meta.get("priority", 3)
+        prio_badge = {1: "🔴", 2: "🟡", 3: "⚪"}.get(prio, "⚪")
+        header = f"{prio_badge} [{pos}/{total}]  <b>{artifact.title}</b>\n\n"
         caption = header + caption_body
 
         # Per-item actions (from frontmatter) take priority over source defaults
