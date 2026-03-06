@@ -178,6 +178,7 @@ class ReviewSession:
     queue: list[str] = field(default_factory=list)
     current_index: int = 0
     decisions: dict = field(default_factory=dict)
+    mixed: bool = False  # True when queue mixes items from multiple sources
 
     def save(self, state_path: str):
         os.makedirs(os.path.dirname(state_path), exist_ok=True)
@@ -188,6 +189,7 @@ class ReviewSession:
                     "queue": self.queue,
                     "current_index": self.current_index,
                     "decisions": self.decisions,
+                    "mixed": self.mixed,
                 },
                 f,
                 ensure_ascii=False,
@@ -206,18 +208,46 @@ class ReviewSession:
             session.queue = data.get("queue", [])
             session.current_index = data.get("current_index", 0)
             session.decisions = data.get("decisions", {})
+            session.mixed = data.get("mixed", False)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load review state: %s", e)
         return session
 
     def build_queue(self, source: ReviewSource):
         self.source_id = source.id
+        self.mixed = False
         decided = set(self.decisions.get(source.id, {}).keys())
         pending = [a for a in source.discover() if a.slug not in decided]
         # Sort by priority (lower = more urgent, default 3)
         pending.sort(key=lambda a: a.meta.get("priority", 3))
         self.queue = [a.slug for a in pending]
         self.current_index = 0
+
+    def build_mixed_queue(self, sources: list[ReviewSource]):
+        """Build a priority-sorted queue across all sources."""
+        self.source_id = "_priority"
+        self.mixed = True
+        all_items: list[tuple[int, str, str]] = []  # (priority, source_id, slug)
+        for source in sources:
+            decided = set(self.decisions.get(source.id, {}).keys())
+            for a in source.discover():
+                if a.slug not in decided:
+                    prio = a.meta.get("priority", 3)
+                    all_items.append((prio, source.id, a.slug))
+        all_items.sort(key=lambda x: x[0])
+        # Encode as "source_id:slug"
+        self.queue = [f"{sid}:{slug}" for _, sid, slug in all_items]
+        self.current_index = 0
+
+    def resolve_current(self) -> tuple[str, str] | None:
+        """Return (source_id, slug) for current item. Works for both modes."""
+        entry = self.current_slug
+        if entry is None:
+            return None
+        if self.mixed and ":" in entry:
+            sid, slug = entry.split(":", 1)
+            return sid, slug
+        return self.source_id, entry
 
     @property
     def current_slug(self) -> str | None:
@@ -346,7 +376,10 @@ class ReviewHandler:
             return
 
         # Multiple sources — show picker
-        buttons = []
+        total_count = sum(c for _, c in available)
+        buttons = [
+            [InlineKeyboardButton(f"🔴 По приоритету ({total_count})", callback_data=f"{CB_PREFIX}src:_priority")]
+        ]
         for source, count in available:
             buttons.append(
                 [InlineKeyboardButton(f"{source.name} ({count})", callback_data=f"{CB_PREFIX}src:{source.id}")]
@@ -405,6 +438,19 @@ class ReviewHandler:
         if data.startswith("src:"):
             await query.answer()
             source_id = data[4:]
+
+            # Priority mode — mixed queue from all sources
+            if source_id == "_priority":
+                sources = self._get_sources()
+                session.build_mixed_queue(sources)
+                self._save_session()
+                await query.edit_message_text(
+                    f"🔴 <b>По приоритету</b> — {session.remaining} items",
+                    parse_mode=ParseMode.HTML,
+                )
+                await self._send_current(context.bot, chat_id)
+                return
+
             source = self._find_source(source_id)
             if not source:
                 await query.edit_message_text("❌ Source not found.")
@@ -433,9 +479,10 @@ class ReviewHandler:
 
         # Skip
         if data == "skip":
-            slug = session.current_slug
-            if slug:
-                session.record(session.source_id, slug, "skip")
+            resolved = session.resolve_current()
+            if resolved:
+                source_id, slug = resolved
+                session.record(source_id, slug, "skip")
                 self._save_session()
             await query.answer("⏭")
             try:
@@ -448,12 +495,16 @@ class ReviewHandler:
         # Action button: act:{index}
         if data.startswith("act:"):
             action_idx = int(data[4:])
-            source = self._find_source(session.source_id)
+            resolved = session.resolve_current()
+            if not resolved:
+                await query.answer("❌ No current item")
+                return
+            source_id, slug = resolved
+            source = self._find_source(source_id)
             if not source:
                 await query.answer("❌ Source lost")
                 return
 
-            slug = session.current_slug
             artifact = source.get_artifact(slug) if slug else None
 
             # Per-item actions take priority over source defaults
@@ -469,7 +520,7 @@ class ReviewHandler:
             if slug:
                 if artifact:
                     _move_artifact(artifact, dest)
-                session.record(session.source_id, slug, label)
+                session.record(source_id, slug, label)
                 self._save_session()
 
             await query.answer(label)
@@ -485,15 +536,22 @@ class ReviewHandler:
     async def _send_current(self, bot: Bot, chat_id: int):
         """Send the current artifact or finish message."""
         session = self._get_session()
-        source = self._find_source(session.source_id)
+        resolved = session.resolve_current()
 
-        if not source or session.current_slug is None:
+        if resolved is None:
             # Queue finished
             stats = self._format_stats(session)
             await bot.send_message(chat_id, f"🏁 Review complete!\n\n{stats}")
             return
 
-        slug = session.current_slug
+        source_id, slug = resolved
+        source = self._find_source(source_id)
+        if not source:
+            session.advance()
+            self._save_session()
+            await self._send_current(bot, chat_id)
+            return
+
         artifact = source.get_artifact(slug)
 
         if artifact is None:
@@ -508,7 +566,8 @@ class ReviewHandler:
         caption_body = artifact.read_caption(max_len=800)
         prio = artifact.meta.get("priority", 3)
         prio_badge = {1: "🔴", 2: "🟡", 3: "⚪"}.get(prio, "⚪")
-        header = f"{prio_badge} [{pos}/{total}]  <b>{artifact.title}</b>\n\n"
+        source_tag = f"  <i>{source.name}</i>" if session.mixed else ""
+        header = f"{prio_badge} [{pos}/{total}]  <b>{artifact.title}</b>{source_tag}\n\n"
         caption = header + caption_body
 
         # Per-item actions (from frontmatter) take priority over source defaults
