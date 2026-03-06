@@ -588,6 +588,14 @@ class ReviewHandler:
         ])
         keyboard = InlineKeyboardMarkup(rows)
 
+        # Check for attached file in frontmatter (e.g. "file": "/path/to/doc.pptx")
+        attached_file = artifact.meta.get("file")
+        if attached_file and not os.path.isabs(attached_file):
+            # Resolve relative paths against work_dir
+            attached_file = os.path.join(self.work_dir, attached_file)
+        if attached_file and not os.path.isfile(attached_file):
+            attached_file = None
+
         if source.preview == "video" and "video" in artifact.files:
             if len(caption) > 1024:
                 caption = caption[:1020] + "..."
@@ -599,6 +607,19 @@ class ReviewHandler:
                     parse_mode=ParseMode.HTML,
                     reply_markup=keyboard,
                     supports_streaming=True,
+                )
+        elif attached_file:
+            # Send attached file as document with caption + buttons
+            short_caption = header + artifact.read_caption(max_len=400)
+            if len(short_caption) > 1024:
+                short_caption = short_caption[:1020] + "..."
+            with open(attached_file, "rb") as f:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    caption=short_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
                 )
         elif source.preview == "document" and "document" in artifact.files:
             if len(caption) > 1024:
