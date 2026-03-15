@@ -120,6 +120,30 @@ class TelegramStream:
             self._last_update = time.time()
             self._dirty = False
 
+    async def start_new_message(self):
+        """Finalize current message and start a fresh one for continued output."""
+        async with self._lock:
+            display = self.chain.render()
+            if display.strip() and self._current_msg:
+                await self._edit_message(self._current_msg, display, reply_markup=None)
+            elif self._current_msg:
+                try:
+                    await self._current_msg.delete()
+                except Exception:
+                    pass
+
+            # Reset for new content
+            self.chain = MessageChain()
+            self._dirty = False
+            self._last_update = 0.0
+
+            self._current_msg = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text="⏳ ...",
+                reply_markup=self.reply_markup,
+            )
+            self._first_msg = self._current_msg
+
     async def finalize(self, footer: str = "", cancelled: bool = False):
         async with self._lock:
             if cancelled:

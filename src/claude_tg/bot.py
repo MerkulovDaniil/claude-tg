@@ -519,16 +519,23 @@ class ClaudeTelegramBot:
     async def _stream_turn(self, events, stream) -> bool:
         """Stream events from a single turn to Telegram. Returns True if RESULT received."""
         response_text = []
+        last_tool_name = ""
         async for event in events:
             if event.type == EventType.TEXT_DELTA:
                 await stream.push_text(event.text)
                 response_text.append(event.text)
             elif event.type == EventType.TOOL_USE:
+                last_tool_name = event.tool_name
                 line = format_tool_call(event.tool_name, event.tool_input)
                 await stream.push_tool_call(line)
-            elif event.type == EventType.TOOL_RESULT and self.config.verbose:
-                html = format_tool_result(event.text)
-                await stream.push_tool_result(html)
+            elif event.type == EventType.TOOL_RESULT:
+                if "ask_user_with_buttons" in last_tool_name:
+                    # User answered via inline button — start fresh message
+                    await stream.start_new_message()
+                elif self.config.verbose:
+                    html = format_tool_result(event.text)
+                    await stream.push_tool_result(html)
+                last_tool_name = ""
             elif event.type == EventType.RESULT:
                 self._session_cost += event.cost_usd
                 duration = event.duration_ms // 1000
