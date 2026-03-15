@@ -1,5 +1,6 @@
 """Handle incoming photos and files from Telegram."""
 import os
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
@@ -43,7 +44,16 @@ class MediaHandler:
 
     async def save_voice(self, voice: Voice, bot) -> str:
         """Download a voice message and return local path."""
-        file = await bot.get_file(voice.file_id)
+        for attempt in range(3):
+            try:
+                file = await bot.get_file(voice.file_id)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(f"get_file attempt {attempt+1} failed: {e}, retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
         local_path = os.path.join(self.upload_dir, f"voice_{voice.file_unique_id}.ogg")
         await file.download_to_drive(local_path)
         self._files.append(local_path)
