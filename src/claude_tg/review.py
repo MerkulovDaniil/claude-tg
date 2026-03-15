@@ -61,8 +61,10 @@ class ReviewSource:
                     artifacts.append(artifact)
         return artifacts
 
-    def count(self) -> int:
-        return len(self.discover())
+    def count(self, decided_slugs: set[str] | None = None) -> int:
+        if decided_slugs is None:
+            return len(self.discover())
+        return sum(1 for a in self.discover() if a.slug not in decided_slugs)
 
     def _build_artifact(self, slug: str) -> "Artifact | None":
         """Build an Artifact if its required text file exists."""
@@ -354,8 +356,9 @@ class ReviewHandler:
             await update.message.reply_text("⚙️ No review sources configured.\nAdd review_sources.json to work directory.")
             return
 
-        # Filter to sources that have items
-        available = [(s, s.count()) for s in sources]
+        # Filter to sources that have undecided items
+        session = self._get_session()
+        available = [(s, s.count(set(session.decisions.get(s.id, {}).keys()))) for s in sources]
         available = [(s, c) for s, c in available if c > 0]
 
         if not available:

@@ -127,6 +127,16 @@ class TelegramStream:
             if footer:
                 self.chain.set_footer(footer)
 
+            # Silent pulse: treat bare "---" as no content
+            raw = self.chain._current.strip()
+            if raw.strip("-") == "" and len(raw) <= 5 and raw:
+                if self._current_msg:
+                    try:
+                        await self._current_msg.delete()
+                    except Exception:
+                        pass
+                return
+
             has_content = bool(self.chain._current.strip() or self.chain._chunks)
             display = self.chain.render()
 

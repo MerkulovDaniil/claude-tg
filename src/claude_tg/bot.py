@@ -1,9 +1,11 @@
 """Telegram bot setup, handlers, and session management."""
+import json
 import os
 import sys
 import time
 import asyncio
 import logging
+from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -62,6 +64,11 @@ class ClaudeTelegramBot:
 
         # Review system
         self.review = ReviewHandler(config.work_dir, config.chat_id, self.conversation_log)
+
+        # Asking queue (for ask_user_with_buttons MCP tool)
+        self._asking_queue_dir = Path(config.work_dir) / "data" / "asking_queue"
+        self._asking_queue_dir.mkdir(parents=True, exist_ok=True)
+        self._waiting_text_for_askq: str | None = None  # qid waiting for text input
 
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
@@ -264,11 +271,154 @@ class ClaudeTelegramBot:
                 await self._stream.finalize(cancelled=True)
                 self._stream = None
 
+    # --- Ask with buttons callback ---
+
+    async def _handle_asking_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline button clicks from ask_user_with_buttons."""
+        query = update.callback_query
+        if query.from_user.id != self.config.chat_id:
+            await query.answer()
+            return
+
+        # Parse: askq:{qid}:{action}
+        parts = query.data.split(":", 2)
+        if len(parts) < 3:
+            await query.answer("❌")
+            return
+
+        _, qid, action = parts
+        queue_file = self._asking_queue_dir / f"{qid}.json"
+
+        if not queue_file.exists():
+            await query.answer("⏰ Expired")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        try:
+            data = json.loads(queue_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            await query.answer("❌ Error")
+            return
+
+        options = data.get("options", [])
+        multi_select = data.get("multi_select", False)
+
+        # "Other" — wait for text input
+        if action == "other":
+            self._waiting_text_for_askq = qid
+            await query.answer()
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await context.bot.send_message(
+                chat_id=self.config.chat_id,
+                text="✏️ Напиши свой вариант:",
+            )
+            return
+
+        # "Done" for multi-select
+        if action == "done" and multi_select:
+            selected = data.get("selected", [])
+            if not selected:
+                await query.answer("Выбери хотя бы один вариант")
+                return
+            data["status"] = "answered"
+            data["answer"] = selected
+            queue_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            await query.answer("✅")
+            try:
+                await query.edit_message_text(
+                    f"{data['question']}\n\n✅ Выбрано: {', '.join(selected)}"
+                )
+            except Exception:
+                pass
+            return
+
+        # Regular option click
+        try:
+            idx = int(action)
+        except ValueError:
+            await query.answer("❌")
+            return
+
+        if idx >= len(options):
+            await query.answer("❌")
+            return
+
+        selected_text = options[idx]
+
+        if multi_select:
+            # Toggle selection
+            selected = data.get("selected", [])
+            if selected_text in selected:
+                selected.remove(selected_text)
+            else:
+                selected.append(selected_text)
+            data["selected"] = selected
+
+            # Rebuild keyboard with checkmarks
+            buttons = []
+            row = []
+            for i, opt in enumerate(options):
+                label = opt if len(opt) <= 28 else opt[:25] + "..."
+                mark = "✅" if opt in selected else "⬜"
+                row.append(InlineKeyboardButton(
+                    f"{mark} {label}", callback_data=f"askq:{qid}:{i}"
+                ))
+                if len(row) >= 2 or i == len(options) - 1:
+                    buttons.append(row)
+                    row = []
+            buttons.append([InlineKeyboardButton("✏️ Другое", callback_data=f"askq:{qid}:other")])
+            buttons.append([InlineKeyboardButton("✅ Готово", callback_data=f"askq:{qid}:done")])
+
+            queue_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            await query.answer(f"{'✅' if selected_text in selected else '⬜'} {selected_text}")
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except Exception:
+                pass
+            return
+
+        # Single select — answer immediately
+        data["status"] = "answered"
+        data["answer"] = selected_text
+        queue_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        await query.answer(f"✅ {selected_text}")
+        try:
+            await query.edit_message_text(
+                f"{data['question']}\n\n✅ {selected_text}"
+            )
+        except Exception:
+            pass
+
     # --- Message handling ---
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
+
+        # Check if we're waiting for text input for ask_user_with_buttons "Other"
+        if self._waiting_text_for_askq:
+            qid = self._waiting_text_for_askq
+            self._waiting_text_for_askq = None
+            queue_file = self._asking_queue_dir / f"{qid}.json"
+            if queue_file.exists():
+                try:
+                    data = json.loads(queue_file.read_text(encoding="utf-8"))
+                    data["status"] = "answered"
+                    data["answer"] = update.message.text
+                    queue_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                    await update.message.reply_text(f"✅ {update.message.text}")
+                    return
+                except (json.JSONDecodeError, OSError):
+                    pass
+
         self._buffer.append(update.message.text)
         await self._schedule_debounce(context)
 
@@ -584,6 +734,9 @@ class ClaudeTelegramBot:
         app.add_handler(CallbackQueryHandler(self.review.handle_callback, pattern=r"^rv:"))
 
         # Callbacks
+        app.add_handler(
+            CallbackQueryHandler(self._handle_asking_callback, pattern=r"^askq:")
+        )
         app.add_handler(
             CallbackQueryHandler(self.handle_cancel_callback, pattern="^claude_cancel$")
         )

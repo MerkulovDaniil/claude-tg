@@ -339,6 +339,11 @@ class ClaudeRunner:
                     data = json.loads(line_str)
                     event = self._parser.parse(data)
                     if event:
+                        if event.type == EventType.TOOL_USE:
+                            logger.info("Tool call: %s(%s)", event.tool_name, json.dumps(event.tool_input, ensure_ascii=False)[:200])
+                        elif event.type == EventType.TOOL_RESULT:
+                            status = "error" if event.is_error else "ok"
+                            logger.info("Tool result: %s (%s, %d chars)", event.tool_name, status, len(event.text))
                         if event.session_id and event.type in (EventType.INIT, EventType.RESULT):
                             self.session_id = event.session_id
                         await self._event_queue.put(event)
