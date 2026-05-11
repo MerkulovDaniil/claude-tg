@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import MessageOriginType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -26,6 +27,46 @@ from .conversation_log import ConversationLog
 from .review import ReviewHandler
 
 logger = logging.getLogger(__name__)
+
+
+def _format_forward_origin(message) -> str | None:
+    """Describe where a forwarded message came from, or None if not forwarded.
+
+    Telegram strips the original `text`/`caption` of a forwarded post and
+    delivers it on the user's incoming message — but without provenance
+    Feanor can't tell the post apart from the user's own words. This adds
+    an explicit prefix so Claude sees: "📨 Переслано из «X»: …".
+    """
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        t = origin.type
+        if t == MessageOriginType.USER:
+            u = origin.sender_user
+            who = u.full_name or u.username or "user"
+            return f"📨 Переслано от {who}"
+        if t == MessageOriginType.HIDDEN_USER:
+            return f"📨 Переслано от {origin.sender_user_name}"
+        if t == MessageOriginType.CHAT:
+            c = origin.sender_chat
+            return f"📨 Переслано из «{c.title or c.username or 'chat'}»"
+        if t == MessageOriginType.CHANNEL:
+            c = origin.chat
+            title = c.title or c.username or "channel"
+            mid = origin.message_id
+            if c.username and mid:
+                return f"📨 Переслано из канала «{title}» (https://t.me/{c.username}/{mid})"
+            return f"📨 Переслано из канала «{title}»"
+        return "📨 Переслано"
+    # Legacy fallback (pre-PTB-22 wire format, defensive)
+    if getattr(message, "forward_from", None):
+        u = message.forward_from
+        return f"📨 Переслано от {u.full_name or u.username or 'user'}"
+    if getattr(message, "forward_from_chat", None):
+        c = message.forward_from_chat
+        return f"📨 Переслано из «{c.title or c.username or 'chat'}»"
+    if getattr(message, "forward_sender_name", None):
+        return f"📨 Переслано от {message.forward_sender_name}"
+    return None
 
 
 class ClaudeTelegramBot:
@@ -82,7 +123,9 @@ class ClaudeTelegramBot:
             logger.info("Session timed out, resetting")
             await self.runner.stop()
             self.runner.clear_session()
-            self.media.cleanup()
+            # Keep files that just arrived for the upcoming turn — wiping them
+            # before the new session reads them is the file-loss bug.
+            self.media.cleanup(keep=self._buffer_photos + self._buffer_docs)
             self._session_cost = 0.0
             self._pending_injections = 0
 
@@ -123,7 +166,7 @@ class ClaudeTelegramBot:
             return
         await self.runner.stop()
         self.runner.clear_session()
-        self.media.cleanup()
+        self.media.cleanup(keep=self._buffer_photos + self._buffer_docs)
         self._session_cost = 0.0
         self._pending_injections = 0
         await update.message.reply_text("🆕 Session cleared.")
@@ -419,7 +462,12 @@ class ClaudeTelegramBot:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-        self._buffer.append(update.message.text)
+        text = update.message.text
+        fwd = _format_forward_origin(update.message)
+        logger.info(f"text msg: len={len(text)}, fwd={bool(fwd)}")
+        if fwd:
+            text = f"{fwd}:\n{text}"
+        self._buffer.append(text)
         await self._schedule_debounce(context)
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -428,8 +476,15 @@ class ClaudeTelegramBot:
         photo = update.message.photo[-1]  # highest resolution
         path = await self.media.save_photo(photo, context.bot)
         self._buffer_photos.append(path)
-        if update.message.caption:
-            self._buffer.append(update.message.caption)
+        caption = update.message.caption
+        fwd = _format_forward_origin(update.message)
+        logger.info(f"photo msg: caption_len={len(caption or '')}, fwd={bool(fwd)}")
+        if fwd and caption:
+            self._buffer.append(f"{fwd}:\n{caption}")
+        elif fwd:
+            self._buffer.append(f"{fwd} (фото без подписи)")
+        elif caption:
+            self._buffer.append(caption)
         await self._schedule_debounce(context)
 
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -437,8 +492,15 @@ class ClaudeTelegramBot:
             return
         path = await self.media.save_document(update.message.document, context.bot)
         self._buffer_docs.append(path)
-        if update.message.caption:
-            self._buffer.append(update.message.caption)
+        caption = update.message.caption
+        fwd = _format_forward_origin(update.message)
+        logger.info(f"doc msg: caption_len={len(caption or '')}, fwd={bool(fwd)}")
+        if fwd and caption:
+            self._buffer.append(f"{fwd}:\n{caption}")
+        elif fwd:
+            self._buffer.append(f"{fwd} (файл без подписи)")
+        elif caption:
+            self._buffer.append(caption)
         await self._schedule_debounce(context)
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,12 +512,56 @@ class ClaudeTelegramBot:
         try:
             ogg_path = await self.media.save_voice(update.message.voice, context.bot)
             text = await self.media.transcribe_voice(ogg_path, self.config.groq_api_key)
+            fwd = _format_forward_origin(update.message)
+            logger.info(f"voice msg: text_len={len(text or '')}, fwd={bool(fwd)}")
             if text:
+                if fwd:
+                    text = f"{fwd}:\n{text}"
                 self._buffer.append(text)
                 await self._schedule_debounce(context)
         except Exception as e:
             logger.exception("Voice transcription failed")
             await update.message.reply_text(f"🎤 Transcription error: {str(e)[:200]}")
+
+    async def handle_other(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Catch-all for message types no specific handler covers (video, animation,
+        sticker, poll, etc.). Without this, a forwarded video post is silently
+        dropped — only the user's separate comment reaches Claude."""
+        if not self._is_authorized(update):
+            return
+        msg = update.message
+        if msg is None:
+            return
+        fwd = _format_forward_origin(msg)
+        kind = "unknown"
+        if msg.video:
+            kind = "video"
+        elif msg.animation:
+            kind = "animation/gif"
+        elif msg.sticker:
+            kind = "sticker"
+        elif msg.poll:
+            kind = "poll"
+        elif msg.audio:
+            kind = "audio"
+        elif msg.video_note:
+            kind = "video_note"
+        elif msg.location:
+            kind = "location"
+        elif msg.contact:
+            kind = "contact"
+        elif msg.story:
+            kind = "story"
+        caption = msg.caption
+        logger.info(f"other msg: kind={kind}, caption_len={len(caption or '')}, fwd={bool(fwd)}")
+        parts = []
+        if fwd:
+            parts.append(fwd)
+        parts.append(f"[{kind}]")
+        if caption:
+            parts.append(caption)
+        self._buffer.append(" ".join(parts) if not caption else f"{' '.join(parts[:-1])}:\n{caption}")
+        await self._schedule_debounce(context)
 
     async def _schedule_debounce(self, context: ContextTypes.DEFAULT_TYPE):
         if self.runner.is_processing:
@@ -503,7 +609,8 @@ class ClaudeTelegramBot:
             return
 
         prompt = self.media.build_prompt(text, photos, docs)
-        self.conversation_log.log_user(text)
+        files_meta = [m for p in photos + docs if (m := self.media.get_meta(p))]
+        self.conversation_log.log_user(text, files=files_meta or None)
 
         try:
             await self.runner.inject(prompt)
@@ -520,33 +627,79 @@ class ClaudeTelegramBot:
         """Stream events from a single turn to Telegram. Returns True if RESULT received."""
         response_text = []
         last_tool_name = ""
-        async for event in events:
-            if event.type == EventType.TEXT_DELTA:
-                await stream.push_text(event.text)
-                response_text.append(event.text)
-            elif event.type == EventType.TOOL_USE:
-                last_tool_name = event.tool_name
-                line = format_tool_call(event.tool_name, event.tool_input)
-                await stream.push_tool_call(line)
-            elif event.type == EventType.TOOL_RESULT:
-                if "ask_user_with_buttons" in last_tool_name:
-                    # User answered via inline button — start fresh message
-                    await stream.start_new_message()
-                elif self.config.verbose:
-                    html = format_tool_result(event.text)
-                    await stream.push_tool_result(html)
-                last_tool_name = ""
-            elif event.type == EventType.RESULT:
-                self._session_cost += event.cost_usd
-                duration = event.duration_ms // 1000
-                ctx_str = f" · ctx {event.context_pct:.0f}%" if event.context_pct is not None else ""
-                footer = f"⏱ {duration}s · {event.num_turns} turns{ctx_str}"
-                await stream.finalize(footer=footer)
-                self.conversation_log.log_assistant("".join(response_text))
-                return True
-        # EOF without RESULT — process died
-        self.conversation_log.log_assistant("".join(response_text))
-        return False
+        last_text_time = time.monotonic()
+        tool_count = 0
+        recent_sigs: list[str] = []
+        last_tool_summary = ""
+        pulse_count = 0
+
+        async def _silence_watchdog():
+            nonlocal pulse_count
+            FIRST_DELAY = 75   # first pulse after 75s of silence
+            REPEAT_DELAY = 90  # then every 90s
+            while True:
+                await asyncio.sleep(10)
+                idle = time.monotonic() - last_text_time
+                threshold = FIRST_DELAY + pulse_count * REPEAT_DELAY
+                if idle < threshold:
+                    continue
+                sig = recent_sigs[-1] if recent_sigs else ""
+                same = sum(1 for s in recent_sigs[-15:] if s == sig)
+                status = f"⏳ {int(idle)}s silent · {tool_count} tools · last: {last_tool_summary or '—'}"
+                if same >= 4:
+                    status += f" · {same}× repeat"
+                try:
+                    await stream.bot.send_message(stream.chat_id, status[:300])
+                    logger.warning("Silence pulse #%d sent (%ds idle)", pulse_count + 1, int(idle))
+                except Exception as e:
+                    logger.warning("Silence pulse send failed: %s", e)
+                pulse_count += 1
+
+        watchdog = asyncio.create_task(_silence_watchdog())
+        try:
+            async for event in events:
+                if event.type == EventType.TEXT_DELTA:
+                    await stream.push_text(event.text)
+                    response_text.append(event.text)
+                    last_text_time = time.monotonic()
+                elif event.type == EventType.TOOL_USE:
+                    last_tool_name = event.tool_name
+                    tool_count += 1
+                    try:
+                        inp_short = json.dumps(event.tool_input, ensure_ascii=False)[:60] if event.tool_input else ""
+                    except Exception:
+                        inp_short = ""
+                    last_tool_summary = f"{event.tool_name}({inp_short})"
+                    recent_sigs.append(last_tool_summary)
+                    if len(recent_sigs) > 30:
+                        recent_sigs.pop(0)
+                    line = format_tool_call(event.tool_name, event.tool_input)
+                    await stream.push_tool_call(line)
+                elif event.type == EventType.TOOL_RESULT:
+                    if "ask_user_with_buttons" in last_tool_name:
+                        # User answered via inline button — start fresh message
+                        await stream.start_new_message()
+                    elif self.config.verbose:
+                        html = format_tool_result(event.text)
+                        await stream.push_tool_result(html)
+                    last_tool_name = ""
+                elif event.type == EventType.RESULT:
+                    self._session_cost += event.cost_usd
+                    duration = event.duration_ms // 1000
+                    ctx_str = f" · ctx {event.context_pct:.0f}%" if event.context_pct is not None else ""
+                    footer = f"⏱ {duration}s · {event.num_turns} turns{ctx_str}"
+                    await stream.finalize(footer=footer)
+                    self.conversation_log.log_assistant("".join(response_text))
+                    return True
+            # EOF without RESULT — process died
+            self.conversation_log.log_assistant("".join(response_text))
+            return False
+        finally:
+            watchdog.cancel()
+            try:
+                await watchdog
+            except (asyncio.CancelledError, Exception):
+                pass
 
     def _new_stream(self, context) -> TelegramStream:
         keyboard = InlineKeyboardMarkup(
@@ -587,7 +740,8 @@ class ClaudeTelegramBot:
             text = bus_context + "\n\n" + text
 
         prompt = self.media.build_prompt(text, photos, docs)
-        self.conversation_log.log_user(text)
+        files_meta = [m for p in photos + docs if (m := self.media.get_meta(p))]
+        self.conversation_log.log_user(text, files=files_meta or None)
 
         stream = self._new_stream(context)
         self._stream = stream
@@ -755,6 +909,14 @@ class ClaudeTelegramBot:
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
+        # Catch-all for video / animation / sticker / poll / etc.
+        # Registered last so the specific handlers above win.
+        other_types = (
+            filters.VIDEO | filters.ANIMATION | filters.Sticker.ALL
+            | filters.POLL | filters.AUDIO | filters.VIDEO_NOTE
+            | filters.LOCATION | filters.CONTACT
+        )
+        app.add_handler(MessageHandler(other_types, self.handle_other))
 
         return app
 

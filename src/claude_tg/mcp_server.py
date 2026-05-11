@@ -61,6 +61,62 @@ async def get_conversation_context(limit: int = 30, max_chars: int = 20000) -> s
 
 
 @mcp.tool()
+async def list_recent_uploads(limit: int = 20) -> str:
+    """List recent files the user uploaded via Telegram (filename, file_id, kind, ts).
+
+    Use to find a file_id that can be passed to redownload_telegram_file when
+    the local upload was wiped (e.g. by session cleanup or restart).
+    """
+    work_dir = os.environ.get("CLAUDE_WORK_DIR", os.getcwd())
+    log = ConversationLog(work_dir)
+    entries = log.get_recent(limit=200, max_chars=200000)
+    out = []
+    for e in entries:
+        files = e.get("files") or []
+        if not files:
+            continue
+        ts = e.get("ts", "")[:19]
+        for f in files:
+            out.append(
+                f"{ts} | {f.get('kind','?')} | {f.get('filename','?')} | "
+                f"file_id={f.get('file_id','?')}"
+            )
+    if not out:
+        return "(no uploads logged — older messages may predate file_id tracking)"
+    return "\n".join(out[-limit:])
+
+
+@mcp.tool()
+async def redownload_telegram_file(file_id: str, filename: str | None = None) -> str:
+    """Re-download a Telegram file by file_id into the uploads dir, return local path.
+
+    Use when an earlier upload's local file was wiped (session cleanup, restart, etc).
+    Get file_id via list_recent_uploads. Telegram keeps file_ids valid effectively
+    forever (file path URLs expire ~1h, but file_id can be re-resolved any time).
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return "Error: TELEGRAM_BOT_TOKEN must be set"
+
+    from telegram import Bot
+    from .media import MediaHandler
+
+    media = MediaHandler()
+    bot = Bot(token=token)
+    try:
+        async with bot:
+            tg_file = await bot.get_file(file_id)
+            target_name = filename or (
+                Path(tg_file.file_path).name if tg_file.file_path else f"file_{file_id[:12]}"
+            )
+            local_path = os.path.join(media.upload_dir, target_name)
+            await tg_file.download_to_drive(local_path)
+        return f"Downloaded to {local_path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 async def ask_user_with_buttons(
     question: str,
     options: list[str],

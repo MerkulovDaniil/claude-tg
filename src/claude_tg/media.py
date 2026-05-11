@@ -1,5 +1,6 @@
 """Handle incoming photos and files from Telegram."""
 import os
+import time
 import asyncio
 import logging
 import tempfile
@@ -21,6 +22,10 @@ class MediaHandler:
         )
         os.makedirs(self.upload_dir, exist_ok=True)
         self._files: list[str] = []
+        self._meta: dict[str, dict] = {}  # local_path → {file_id, filename, kind}
+
+    def get_meta(self, local_path: str) -> dict | None:
+        return self._meta.get(local_path)
 
     async def save_photo(self, photo: PhotoSize, bot) -> str:
         """Download a photo and return local path."""
@@ -29,6 +34,11 @@ class MediaHandler:
         local_path = os.path.join(self.upload_dir, f"photo_{photo.file_unique_id}{ext}")
         await file.download_to_drive(local_path)
         self._files.append(local_path)
+        self._meta[local_path] = {
+            "file_id": photo.file_id,
+            "filename": os.path.basename(local_path),
+            "kind": "photo",
+        }
         logger.info(f"Saved photo: {local_path}")
         return local_path
 
@@ -39,6 +49,11 @@ class MediaHandler:
         local_path = os.path.join(self.upload_dir, filename)
         await file.download_to_drive(local_path)
         self._files.append(local_path)
+        self._meta[local_path] = {
+            "file_id": doc.file_id,
+            "filename": filename,
+            "kind": "document",
+        }
         logger.info(f"Saved document: {local_path}")
         return local_path
 
@@ -57,7 +72,26 @@ class MediaHandler:
         local_path = os.path.join(self.upload_dir, f"voice_{voice.file_unique_id}.ogg")
         await file.download_to_drive(local_path)
         self._files.append(local_path)
+        self._meta[local_path] = {
+            "file_id": voice.file_id,
+            "filename": os.path.basename(local_path),
+            "kind": "voice",
+        }
         logger.info(f"Saved voice: {local_path}")
+        return local_path
+
+    async def redownload(self, file_id: str, filename: str, bot) -> str:
+        """Re-download a file by its Telegram file_id (for recovering wiped uploads)."""
+        file = await bot.get_file(file_id)
+        local_path = os.path.join(self.upload_dir, filename)
+        await file.download_to_drive(local_path)
+        self._files.append(local_path)
+        self._meta[local_path] = {
+            "file_id": file_id,
+            "filename": filename,
+            "kind": "redownload",
+        }
+        logger.info(f"Redownloaded: {local_path}")
         return local_path
 
     async def transcribe_voice(self, ogg_path: str, api_key: str) -> str:
@@ -83,23 +117,53 @@ class MediaHandler:
             parts.append(text)
         return "\n".join(parts) if parts else text
 
-    def cleanup(self):
-        """Remove all tracked files."""
+    def cleanup(self, keep: list[str] | None = None):
+        """Remove tracked files except those in `keep`.
+
+        Files in `keep` (e.g. current buffer) survive cleanup — protects against
+        wiping a file that was just downloaded for a turn that's about to start.
+        """
+        keep_set = set(keep or [])
+        survivors: list[str] = []
         for path in self._files:
+            if path in keep_set:
+                survivors.append(path)
+                continue
             try:
                 os.remove(path)
                 logger.debug(f"Cleaned up: {path}")
             except OSError:
                 pass
-        self._files.clear()
+        self._files = survivors
 
-    def cleanup_all(self):
-        """Remove entire upload directory contents (for startup cleanup)."""
-        self.cleanup()
+    def cleanup_all(self, max_age_seconds: int = 86400):
+        """Remove tracked files and stale files in upload dir.
+
+        Files younger than `max_age_seconds` are kept — protects against wiping
+        a file that arrived seconds before a bot restart, before the new session
+        could read it. Default 24h.
+        """
+        # Wipe tracked files unconditionally except recent ones
+        keep_recent: list[str] = []
+        cutoff = time.time() - max_age_seconds
+        for path in list(self._files):
+            try:
+                if os.path.getmtime(path) > cutoff:
+                    keep_recent.append(path)
+                    continue
+            except OSError:
+                pass
+        self.cleanup(keep=keep_recent)
+
+        # Also wipe stray files in upload dir (not tracked by this instance),
+        # but only if older than cutoff.
         try:
             for f in os.listdir(self.upload_dir):
+                fp = os.path.join(self.upload_dir, f)
                 try:
-                    os.remove(os.path.join(self.upload_dir, f))
+                    if os.path.getmtime(fp) <= cutoff:
+                        os.remove(fp)
+                        logger.debug(f"Cleaned up stale: {fp}")
                 except OSError:
                     pass
         except OSError:

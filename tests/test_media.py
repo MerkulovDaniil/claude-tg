@@ -44,3 +44,32 @@ class TestMediaHandler:
 
     def test_cleanup_on_empty(self):
         self.handler.cleanup()  # should not raise
+
+    def test_cleanup_keep_preserves_files(self):
+        keep_path = os.path.join(self.tmpdir, "keep.txt")
+        wipe_path = os.path.join(self.tmpdir, "wipe.txt")
+        for p in (keep_path, wipe_path):
+            with open(p, "w") as f:
+                f.write("x")
+            self.handler._files.append(p)
+        self.handler.cleanup(keep=[keep_path])
+        assert os.path.exists(keep_path), "kept file should survive cleanup"
+        assert not os.path.exists(wipe_path), "non-kept file should be removed"
+        assert keep_path in self.handler._files
+        assert wipe_path not in self.handler._files
+
+    def test_cleanup_all_preserves_recent(self):
+        import time as _t
+        recent = os.path.join(self.tmpdir, "recent.txt")
+        old = os.path.join(self.tmpdir, "old.txt")
+        with open(recent, "w") as f:
+            f.write("r")
+        with open(old, "w") as f:
+            f.write("o")
+        # Backdate `old` by 2 days
+        old_ts = _t.time() - 2 * 86400
+        os.utime(old, (old_ts, old_ts))
+        self.handler._files.extend([recent, old])
+        self.handler.cleanup_all(max_age_seconds=86400)
+        assert os.path.exists(recent), "recent file must not be wiped on startup"
+        assert not os.path.exists(old), "stale file should be wiped on startup"

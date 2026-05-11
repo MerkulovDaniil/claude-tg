@@ -23,9 +23,16 @@ class ConversationLog:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def log_user(self, text: str):
-        """User message from Telegram."""
-        self._write({"role": "user", "text": text})
+    def log_user(self, text: str, files: list[dict] | None = None):
+        """User message from Telegram. `files` is a list of {file_id, filename, kind, path}.
+
+        File metadata is logged so that uploads can be re-downloaded via the
+        Telegram bot API later (file paths are local and may be wiped).
+        """
+        entry: dict = {"role": "user", "text": text}
+        if files:
+            entry["files"] = files
+        self._write(entry)
 
     def log_assistant(self, text: str):
         """Feanor's response (final text shown in TG)."""

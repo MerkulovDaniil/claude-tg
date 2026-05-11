@@ -129,6 +129,26 @@ class StreamParser:
         for block in content:
             if block.get("type") == "tool_result":
                 raw = block.get("content", "")
+                # Multimodal results (e.g. Read on PNG) come as a list of
+                # content blocks. Flatten to a string so downstream logging /
+                # formatting doesn't silently report "1 chars" or crash.
+                if isinstance(raw, list):
+                    parts = []
+                    for p in raw:
+                        if not isinstance(p, dict):
+                            continue
+                        ptype = p.get("type")
+                        if ptype == "text":
+                            parts.append(p.get("text", ""))
+                        elif ptype == "image":
+                            src = p.get("source", {})
+                            mime = src.get("media_type", "image")
+                            parts.append(f"[{mime}]")
+                        else:
+                            parts.append(f"[{ptype}]")
+                    raw = "\n".join(parts) if parts else f"[multimodal:{len(content)}]"
+                elif not isinstance(raw, str):
+                    raw = str(raw)
                 return RunnerEvent(
                     type=EventType.TOOL_RESULT,
                     text=raw,
