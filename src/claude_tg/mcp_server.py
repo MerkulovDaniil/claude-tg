@@ -48,7 +48,7 @@ async def send_telegram_file(file_path: str, caption: str = "", temp_file: bool 
 
 
 @mcp.tool()
-async def get_conversation_context(limit: int = 30, max_chars: int = 20000) -> str:
+async def get_conversation_context(limit: int = 30, max_chars: int = 100000) -> str:
     """Get recent Telegram conversation history — messages the user sees in chat.
 
     Includes: user messages, Feanor responses, trigger prompts (heartbeat/worker),

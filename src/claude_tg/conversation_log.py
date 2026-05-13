@@ -93,7 +93,7 @@ class ConversationLog:
         entries.reverse()
         return entries
 
-    def format_context(self, limit: int = 30, max_chars: int = 20000) -> str:
+    def format_context(self, limit: int = 30, max_chars: int = 100000) -> str:
         """Format recent messages as readable context for injection into prompts."""
         entries = self.get_recent(limit=limit, max_chars=max_chars)
         if not entries:
@@ -104,7 +104,6 @@ class ConversationLog:
             role = e.get("role", "?")
             text = e.get("text", "")
             ts = e.get("ts", "")
-            # Compact timestamp: just HH:MM
             time_str = ""
             if ts:
                 try:
@@ -112,10 +111,6 @@ class ConversationLog:
                     time_str = dt.strftime("%H:%M")
                 except ValueError:
                     pass
-
-            # Truncate very long messages
-            if len(text) > 500:
-                text = text[:500] + "…"
 
             prefix = {"user": "👤", "assistant": "🤖", "trigger": "📥", "direct": "📢", "review": "📋"}.get(role, "?")
             source = e.get("source", "")
