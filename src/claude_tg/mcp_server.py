@@ -31,15 +31,37 @@ async def send_telegram_file(file_path: str, caption: str = "", temp_file: bool 
 
     from telegram import Bot
 
+    ext = path.suffix.lower()
     bot = Bot(token=token)
     async with bot:
         with path.open("rb") as f:
-            await bot.send_document(
-                chat_id=int(chat_id),
-                document=f,
-                filename=path.name,
-                caption=caption or None,
-            )
+            if ext in {".ogg", ".oga", ".opus"}:
+                try:
+                    await bot.send_voice(
+                        chat_id=int(chat_id),
+                        voice=f,
+                        caption=caption or None,
+                    )
+                except Exception:
+                    f.seek(0)
+                    await bot.send_audio(
+                        chat_id=int(chat_id),
+                        audio=f,
+                        caption=caption or None,
+                    )
+            elif ext in {".mp3", ".m4a", ".aac", ".flac", ".wav"}:
+                await bot.send_audio(
+                    chat_id=int(chat_id),
+                    audio=f,
+                    caption=caption or None,
+                )
+            else:
+                await bot.send_document(
+                    chat_id=int(chat_id),
+                    document=f,
+                    filename=path.name,
+                    caption=caption or None,
+                )
 
     if temp_file:
         path.unlink(missing_ok=True)

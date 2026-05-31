@@ -66,7 +66,29 @@ A background reader continuously drains stdout into an asyncio queue, preventing
 ### Media
 - **Photos & documents** → saved locally, passed to Claude as file references
 - **Voice messages** → transcribed via Groq Whisper (free), then sent as text
-- **Files from Claude** → sent back to Telegram via built-in MCP server
+- **Files from Claude** → sent back to Telegram via built-in MCP server. Routed by extension: `.ogg/.opus` → voice message; `.mp3/.m4a/.aac/.flac/.wav` → audio; anything else → document.
+
+### Tappable buttons (`ask_user_with_buttons`)
+The built-in MCP server exposes `ask_user_with_buttons(question, options, multi_select=False, timeout=120)` which renders an `InlineKeyboardMarkup` in Telegram. The standard `AskUserQuestion` tool from the Claude Code SDK uses a terminal-only UI and shows no buttons in Telegram — use `ask_user_with_buttons` instead.
+
+To make this routing automatic, register the bundled `PreToolUse` hook in your `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {"type": "command", "command": "/path/to/claude-tg/scripts/hooks/redirect_ask_to_tg_buttons.py"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook detects whether Claude is running inside the `claude-tg.service` cgroup. In Telegram sessions it blocks `AskUserQuestion` and tells the model to call `ask_user_with_buttons` instead; in plain terminal sessions it does nothing.
 
 ### External automation (triggers)
 ```bash
