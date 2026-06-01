@@ -217,6 +217,41 @@ class ClaudeTelegramBot:
             await self.runner.stop()
         await update.message.reply_text(f"Model set to: {self.runner.model}")
 
+    async def cmd_effort(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set reasoning effort for the headless claude session.
+
+        The interactive `/effort` slider can't render in a `claude -p` session,
+        so we handle it locally: set the level and relaunch the subprocess with
+        the `--effort` CLI flag (same pattern as /model). No flag = settings.json
+        effortLevel is used.
+        """
+        if not self._is_authorized(update):
+            return
+        levels = {"low", "medium", "high", "xhigh", "max", "ultracode"}
+        if not context.args:
+            current = self.runner.effort or "default (settings.json)"
+            await update.message.reply_text(
+                f"Current effort: {current}\n"
+                f"Usage: /effort <low|medium|high|xhigh|max|ultracode>"
+            )
+            return
+        level = context.args[0].lower()
+        if level not in levels:
+            await update.message.reply_text(
+                f"Unknown effort '{level}'. Choose: " + ", ".join(sorted(levels))
+            )
+            return
+        self.runner.effort = level
+        # Stop process so next run() starts with the new effort
+        if self.runner.is_processing:
+            await self.runner.cancel()
+            if self._stream:
+                await self._stream.finalize(cancelled=True)
+                self._stream = None
+        elif self.runner.process_alive:
+            await self.runner.stop()
+        await update.message.reply_text(f"Effort set to: {level} (applies on next message)")
+
     async def cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
@@ -895,6 +930,7 @@ class ClaudeTelegramBot:
         app.add_handler(CommandHandler("cost", self.cmd_cost))
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("model", self.cmd_model))
+        app.add_handler(CommandHandler("effort", self.cmd_effort))
         app.add_handler(CommandHandler("restart", self.cmd_restart))
 
         # Custom commands (auto-discovered from {work_dir}/commands/)

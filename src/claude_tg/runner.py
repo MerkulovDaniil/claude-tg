@@ -238,10 +238,12 @@ class ClaudeRunner:
     preventing pipe buffer deadlocks when injected turns produce unread output.
     """
 
-    def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None):
+    def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None,
+                 effort: str | None = None):
         self.work_dir = work_dir
         self.model = model
         self.max_budget = max_budget
+        self.effort = effort
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.is_processing = False
@@ -297,6 +299,8 @@ class ClaudeRunner:
             cmd.extend(["--resume", self.session_id])
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
         if self.max_budget:
             cmd.extend(["--max-budget-usd", str(self.max_budget)])
 
