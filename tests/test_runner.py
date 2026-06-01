@@ -208,8 +208,11 @@ class TestEventQueue:
         async for e in runner._read_until_result():
             events.append(e)
 
-        # Clean exit — no error text
-        assert len(events) == 0
+        # Даже на чистом выходе (rc=0) без вывода шлём уведомление — иначе юзер
+        # залипнет на «Thinking…», которое молча исчезнет (поведение с v0.7.4).
+        assert len(events) == 1
+        assert "without response" in events[0].text
+        assert "rc=0" in events[0].text
 
     @pytest.mark.asyncio
     async def test_read_until_result_handles_error(self):
