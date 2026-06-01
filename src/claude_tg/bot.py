@@ -924,6 +924,13 @@ class ClaudeTelegramBot:
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
+        # Неизвестные слэш-команды (не наши) → форвард в Claude как есть.
+        # Регистрируется ПОСЛЕ наших CommandHandler'ов, поэтому /clear, /review и
+        # т.п. перехватывают они, а /goal, /code-review, /loop, /schedule и любые
+        # команды Claude Code уходят в сессию (Claude Code их разворачивает сам).
+        app.add_handler(
+            MessageHandler(filters.COMMAND & filters.ChatType.PRIVATE, self.handle_text)
+        )
         # Catch-all for video / animation / sticker / poll / etc.
         # Registered last so the specific handlers above win.
         other_types = (
