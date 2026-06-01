@@ -91,18 +91,17 @@ async def list_recent_uploads(limit: int = 20) -> str:
     """
     work_dir = os.environ.get("CLAUDE_WORK_DIR", os.getcwd())
     log = ConversationLog(work_dir)
-    entries = log.get_recent(limit=200, max_chars=200000)
-    out = []
+    entries = log.get_recent(limit=400, max_chars=400000)
+    by_id: dict[str, str] = {}  # file_id → строка (дедуп: приём + флаш пишут один файл)
     for e in entries:
         files = e.get("files") or []
-        if not files:
-            continue
         ts = e.get("ts", "")[:19]
         for f in files:
-            out.append(
-                f"{ts} | {f.get('kind','?')} | {f.get('filename','?')} | "
-                f"file_id={f.get('file_id','?')}"
+            fid = f.get("file_id", "?")
+            by_id[fid] = (
+                f"{ts} | {f.get('kind','?')} | {f.get('filename','?')} | file_id={fid}"
             )
+    out = list(by_id.values())
     if not out:
         return "(no uploads logged — older messages may predate file_id tracking)"
     return "\n".join(out[-limit:])

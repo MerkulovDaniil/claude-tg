@@ -27,9 +27,22 @@ class MediaHandler:
     def get_meta(self, local_path: str) -> dict | None:
         return self._meta.get(local_path)
 
+    @staticmethod
+    async def _get_file(file_id: str, bot, attempts: int = 3):
+        """bot.get_file с ретраями — getFile часто транзиентно падает по сети."""
+        for attempt in range(attempts):
+            try:
+                return await bot.get_file(file_id)
+            except Exception as e:
+                if attempt < attempts - 1:
+                    logger.warning(f"get_file attempt {attempt+1} failed: {e}, retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
+
     async def save_photo(self, photo: PhotoSize, bot) -> str:
         """Download a photo and return local path."""
-        file = await bot.get_file(photo.file_id)
+        file = await self._get_file(photo.file_id, bot)
         ext = Path(file.file_path).suffix if file.file_path else ".jpg"
         local_path = os.path.join(self.upload_dir, f"photo_{photo.file_unique_id}{ext}")
         await file.download_to_drive(local_path)
@@ -44,7 +57,7 @@ class MediaHandler:
 
     async def save_document(self, doc: Document, bot) -> str:
         """Download a document and return local path."""
-        file = await bot.get_file(doc.file_id)
+        file = await self._get_file(doc.file_id, bot)
         filename = doc.file_name or f"file_{doc.file_unique_id}"
         local_path = os.path.join(self.upload_dir, filename)
         await file.download_to_drive(local_path)
@@ -59,16 +72,7 @@ class MediaHandler:
 
     async def save_voice(self, voice: Voice, bot) -> str:
         """Download a voice message and return local path."""
-        for attempt in range(3):
-            try:
-                file = await bot.get_file(voice.file_id)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning(f"get_file attempt {attempt+1} failed: {e}, retrying...")
-                    await asyncio.sleep(1)
-                else:
-                    raise
+        file = await self._get_file(voice.file_id, bot)
         local_path = os.path.join(self.upload_dir, f"voice_{voice.file_unique_id}.ogg")
         await file.download_to_drive(local_path)
         self._files.append(local_path)
@@ -82,7 +86,7 @@ class MediaHandler:
 
     async def redownload(self, file_id: str, filename: str, bot) -> str:
         """Re-download a file by its Telegram file_id (for recovering wiped uploads)."""
-        file = await bot.get_file(file_id)
+        file = await self._get_file(file_id, bot)
         local_path = os.path.join(self.upload_dir, filename)
         await file.download_to_drive(local_path)
         self._files.append(local_path)

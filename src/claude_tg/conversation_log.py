@@ -34,6 +34,13 @@ class ConversationLog:
             entry["files"] = files
         self._write(entry)
 
+    def log_upload(self, meta: dict):
+        """Persist a received file's metadata IMMEDIATELY on arrival, so its file_id is
+        recoverable via list_recent_uploads even if the message is never flushed
+        (e.g. download or processing failed). Deduped by file_id at read time."""
+        if meta:
+            self._write({"role": "upload", "files": [meta]})
+
     def log_assistant(self, text: str):
         """Feanor's response (final text shown in TG)."""
         if text.strip():
@@ -102,6 +109,8 @@ class ConversationLog:
         lines = []
         for e in entries:
             role = e.get("role", "?")
+            if role == "upload":
+                continue  # служебная запись file_id, не для контекста
             text = e.get("text", "")
             ts = e.get("ts", "")
             time_str = ""

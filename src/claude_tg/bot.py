@@ -474,7 +474,14 @@ class ClaudeTelegramBot:
         if not self._is_authorized(update):
             return
         photo = update.message.photo[-1]  # highest resolution
-        path = await self.media.save_photo(photo, context.bot)
+        try:
+            path = await self.media.save_photo(photo, context.bot)
+        except Exception:
+            logger.exception("save_photo failed")
+            await update.message.reply_text("⚠️ Не смог принять фото, пришли ещё раз.")
+            return
+        if (meta := self.media.get_meta(path)):
+            self.conversation_log.log_upload(meta)  # file_id сразу, не теряем
         self._buffer_photos.append(path)
         caption = update.message.caption
         fwd = _format_forward_origin(update.message)
@@ -490,7 +497,15 @@ class ClaudeTelegramBot:
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        path = await self.media.save_document(update.message.document, context.bot)
+        try:
+            path = await self.media.save_document(update.message.document, context.bot)
+        except Exception:
+            logger.exception("save_document failed")
+            name = (update.message.document.file_name if update.message.document else None) or "файл"
+            await update.message.reply_text(f"⚠️ Не смог принять «{name}», пришли ещё раз.")
+            return
+        if (meta := self.media.get_meta(path)):
+            self.conversation_log.log_upload(meta)  # file_id сразу, не теряем
         self._buffer_docs.append(path)
         caption = update.message.caption
         fwd = _format_forward_origin(update.message)
