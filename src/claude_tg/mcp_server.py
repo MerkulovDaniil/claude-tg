@@ -69,6 +69,63 @@ async def send_telegram_file(file_path: str, caption: str = "", temp_file: bool 
     return f"File {path.name} sent to Telegram"
 
 
+def _chunk_text(text: str, size: int = 4000) -> list[str]:
+    """Split text into <=size chunks on line boundaries (Telegram cap is 4096)."""
+    if len(text) <= size:
+        return [text]
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > size:                      # a single very long line
+            if cur:
+                chunks.append(cur); cur = ""
+            chunks.append(line[:size]); line = line[size:]
+        if len(cur) + len(line) + 1 > size:
+            chunks.append(cur); cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+@mcp.tool()
+async def send_telegram_message(text: str, disable_preview: bool = True) -> str:
+    """Send a plain-text message to the user via Telegram (proactive push).
+
+    Use this to message the user from within a turn or after long background
+    work finishes (e.g. "collection done") — instead of the curl DIRECT hack.
+    Long text is auto-split on line boundaries to respect Telegram's 4096 cap.
+    For files/voice use send_telegram_file; for choices use ask_user_with_buttons.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return "Error: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set"
+    text = (text or "").strip()
+    if not text:
+        return "Error: empty text"
+
+    from telegram import Bot
+
+    parts = _chunk_text(text)
+    bot = Bot(token=token)
+    async with bot:
+        for part in parts:
+            await bot.send_message(
+                chat_id=int(chat_id),
+                text=part,
+                disable_web_page_preview=disable_preview,
+            )
+    # Mirror the DIRECT path so get_conversation_context stays accurate.
+    try:
+        work_dir = os.environ.get("CLAUDE_WORK_DIR", os.getcwd())
+        ConversationLog(work_dir).log_direct(text)
+    except Exception:
+        pass
+
+    return f"Message sent to Telegram ({len(text)} chars, {len(parts)} part(s))"
+
+
 @mcp.tool()
 async def get_conversation_context(limit: int = 30, max_chars: int = 100000) -> str:
     """Get recent Telegram conversation history — messages the user sees in chat.
