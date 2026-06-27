@@ -553,6 +553,36 @@ class ClaudeTelegramBot:
             self._buffer.append(caption)
         await self._schedule_debounce(context)
 
+    async def handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Audio files (music tracks) — download to disk and treat as a file
+        attachment so the path reaches Claude (e.g. music-library skill). Without
+        this, audio fell through to handle_other and was never downloaded."""
+        if not self._is_authorized(update):
+            return
+        audio = update.message.audio
+        try:
+            path = await self.media.save_audio(audio, context.bot)
+        except Exception:
+            logger.exception("save_audio failed")
+            await update.message.reply_text("⚠️ Не смог принять аудио, пришли ещё раз.")
+            return
+        if (meta := self.media.get_meta(path)):
+            self.conversation_log.log_upload(meta)
+        self._buffer_docs.append(path)
+        caption = update.message.caption
+        fwd = _format_forward_origin(update.message)
+        hint_parts = [p for p in (getattr(audio, "performer", None), getattr(audio, "title", None)) if p]
+        hint = " — ".join(hint_parts)
+        logger.info(f"audio msg: hint='{hint}', caption_len={len(caption or '')}, fwd={bool(fwd)}")
+        note = "[аудиотрек]" + (f" {hint}" if hint else "")
+        if fwd:
+            note = f"{fwd} {note}"
+        if caption:
+            self._buffer.append(f"{note}:\n{caption}")
+        else:
+            self._buffer.append(note)
+        await self._schedule_debounce(context)
+
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
@@ -956,6 +986,7 @@ class ClaudeTelegramBot:
         # Messages (order matters: specific types before catch-all text)
         app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
+        app.add_handler(MessageHandler(filters.AUDIO, self.handle_audio))
         app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
@@ -971,7 +1002,7 @@ class ClaudeTelegramBot:
         # Registered last so the specific handlers above win.
         other_types = (
             filters.VIDEO | filters.ANIMATION | filters.Sticker.ALL
-            | filters.POLL | filters.AUDIO | filters.VIDEO_NOTE
+            | filters.POLL | filters.VIDEO_NOTE
             | filters.LOCATION | filters.CONTACT
         )
         app.add_handler(MessageHandler(other_types, self.handle_other))

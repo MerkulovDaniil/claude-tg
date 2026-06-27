@@ -70,6 +70,31 @@ class MediaHandler:
         logger.info(f"Saved document: {local_path}")
         return local_path
 
+    async def save_audio(self, audio, bot) -> str:
+        """Download an audio file (music track) and return local path.
+
+        Telegram `Audio` carries file_name/performer/title; we preserve the
+        original filename when present so downstream tools (music-library skill)
+        get a sane name and extension."""
+        file = await self._get_file(audio.file_id, bot)
+        ext = Path(file.file_path).suffix if file.file_path else ""
+        if audio.file_name:
+            filename = audio.file_name
+        else:
+            stem_parts = [p for p in (audio.performer, audio.title) if p]
+            stem = " - ".join(stem_parts) if stem_parts else f"audio_{audio.file_unique_id}"
+            filename = f"{stem}{ext or '.mp3'}"
+        local_path = os.path.join(self.upload_dir, filename)
+        await file.download_to_drive(local_path)
+        self._files.append(local_path)
+        self._meta[local_path] = {
+            "file_id": audio.file_id,
+            "filename": filename,
+            "kind": "audio",
+        }
+        logger.info(f"Saved audio: {local_path}")
+        return local_path
+
     async def save_voice(self, voice: Voice, bot) -> str:
         """Download a voice message and return local path."""
         file = await self._get_file(voice.file_id, bot)
