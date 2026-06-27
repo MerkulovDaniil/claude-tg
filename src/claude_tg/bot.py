@@ -221,27 +221,41 @@ class ClaudeTelegramBot:
         """Set reasoning effort for the headless claude session.
 
         The interactive `/effort` slider can't render in a `claude -p` session,
-        so we handle it locally: set the level and relaunch the subprocess with
-        the `--effort` CLI flag (same pattern as /model). No flag = settings.json
-        effortLevel is used.
+        so we handle it locally: set the level and relaunch the subprocess.
+        Regular levels go through the `--effort` CLI flag (same pattern as
+        /model). "ultracode" is special: it's not an --effort value (the flag
+        rejects it) but a session settings key, so we relaunch with
+        `--settings '{"ultracode": true}'` (= xhigh + dynamic workflows).
+        No flag = settings.json effortLevel is used.
         """
         if not self._is_authorized(update):
             return
-        levels = {"low", "medium", "high", "xhigh", "max", "ultracode"}
+        # Values accepted by the headless `--effort` flag. "ultracode" is handled
+        # separately below — it's a settings key, not an effort level.
+        levels = {"low", "medium", "high", "xhigh", "max"}
         if not context.args:
-            current = self.runner.effort or "default (settings.json)"
+            current = "ultracode" if self.runner.ultracode else (
+                self.runner.effort or "default (settings.json)")
             await update.message.reply_text(
                 f"Current effort: {current}\n"
                 f"Usage: /effort <low|medium|high|xhigh|max|ultracode>"
             )
             return
         level = context.args[0].lower()
-        if level not in levels:
+        if level == "ultracode":
+            self.runner.ultracode = True
+            self.runner.effort = None
+            reply = "Effort set to: ultracode (xhigh + dynamic workflows; applies on next message)"
+        elif level in levels:
+            self.runner.ultracode = False
+            self.runner.effort = level
+            reply = f"Effort set to: {level} (applies on next message)"
+        else:
             await update.message.reply_text(
-                f"Unknown effort '{level}'. Choose: " + ", ".join(sorted(levels))
+                f"Unknown effort '{level}'. Choose: "
+                + ", ".join(sorted(levels)) + ", ultracode"
             )
             return
-        self.runner.effort = level
         # Stop process so next run() starts with the new effort
         if self.runner.is_processing:
             await self.runner.cancel()
@@ -250,7 +264,7 @@ class ClaudeTelegramBot:
                 self._stream = None
         elif self.runner.process_alive:
             await self.runner.stop()
-        await update.message.reply_text(f"Effort set to: {level} (applies on next message)")
+        await update.message.reply_text(reply)
 
     async def cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):

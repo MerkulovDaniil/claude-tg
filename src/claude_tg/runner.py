@@ -239,11 +239,14 @@ class ClaudeRunner:
     """
 
     def __init__(self, work_dir: str, model: str | None = None, max_budget: float | None = None,
-                 effort: str | None = None):
+                 effort: str | None = None, ultracode: bool = False):
         self.work_dir = work_dir
         self.model = model
         self.max_budget = max_budget
         self.effort = effort
+        # ultracode is not an --effort value (that flag rejects it); it's a
+        # session settings key. Enabling it = xhigh effort + dynamic workflows.
+        self.ultracode = ultracode
         self.session_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.is_processing = False
@@ -299,7 +302,11 @@ class ClaudeRunner:
             cmd.extend(["--resume", self.session_id])
         if self.model:
             cmd.extend(["--model", self.model])
-        if self.effort:
+        if self.ultracode:
+            # ultracode → xhigh + dynamic workflow orchestration, via the
+            # session settings key (the headless --effort flag rejects "ultracode").
+            cmd.extend(["--settings", '{"ultracode": true}'])
+        elif self.effort:
             cmd.extend(["--effort", self.effort])
         if self.max_budget:
             cmd.extend(["--max-budget-usd", str(self.max_budget)])
