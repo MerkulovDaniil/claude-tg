@@ -65,6 +65,12 @@ class MessageChain:
 class TelegramStream:
     """Stream Claude output to Telegram with adaptive rate limiting and automatic message chaining."""
 
+    # Atomic-message delimiter — same marker pulse.sh splits on. When it appears
+    # in the streamed text, the buffer before it is finalized as its own Telegram
+    # message and a fresh one starts. Keeps the convention uniform: ===MSG=== in
+    # the model output → separate messages everywhere, not literal text in chat.
+    SPLIT_MARKER = "===MSG==="
+
     def __init__(self, bot, chat_id: int, update_interval: float = 2.0, reply_markup: InlineKeyboardMarkup | None = None):
         self.bot = bot
         self.chat_id = chat_id
@@ -85,6 +91,16 @@ class TelegramStream:
     async def push_text(self, text: str):
         self.chain.append_text(text)
         self._dirty = True
+        # Split the stream into separate messages on ===MSG===. A delimiter that
+        # straddles two deltas (e.g. "===MS" then "G===") just matches once the
+        # remainder arrives — `in` is False until then, so nothing leaks.
+        while self.SPLIT_MARKER in self.chain._current:
+            before, after = self.chain._current.split(self.SPLIT_MARKER, 1)
+            if before.strip():
+                self.chain._current = before
+                await self.start_new_message()  # finalize `before`, open fresh placeholder
+            self.chain._current = after  # drop the delimiter; continue with the rest
+            self._dirty = True
         await self._maybe_update()
 
     async def push_tool_call(self, line: str):
