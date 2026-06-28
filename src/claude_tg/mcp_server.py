@@ -231,33 +231,20 @@ async def ask_user_with_buttons(
     }
     queue_file.write_text(json.dumps(queue_data, ensure_ascii=False), encoding="utf-8")
 
-    # Build inline keyboard
+    # Build message: full option text lives in the BODY (never truncated by Telegram),
+    # buttons are compact numbers so long labels stay fully readable. (fix 2026-06-28:
+    # inline-button labels were cut to ~30 chars / 2-per-row → user couldn't read them.)
     from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    from .askq_ui import build_ask_text, build_ask_keyboard
 
-    buttons = []
-    row = []
-    for i, opt in enumerate(options):
-        label = opt if len(opt) <= 30 else opt[:27] + "..."
-        if multi_select:
-            label = f"⬜ {label}"
-        row.append(InlineKeyboardButton(label, callback_data=f"askq:{qid}:{i}"))
-        if len(row) >= 2 or i == len(options) - 1:
-            buttons.append(row)
-            row = []
-
-    # "Other" button
-    buttons.append([InlineKeyboardButton("✏️ Другое", callback_data=f"askq:{qid}:other")])
-
-    if multi_select:
-        buttons.append([InlineKeyboardButton("✅ Готово", callback_data=f"askq:{qid}:done")])
-
-    keyboard = InlineKeyboardMarkup(buttons)
+    text = build_ask_text(question, options, [], multi_select)
+    keyboard = build_ask_keyboard(qid, options, [], multi_select)
 
     bot = Bot(token=token)
     async with bot:
         await bot.send_message(
             chat_id=int(chat_id),
-            text=question,
+            text=text,
             reply_markup=keyboard,
         )
 

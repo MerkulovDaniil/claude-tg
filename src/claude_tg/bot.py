@@ -452,26 +452,15 @@ class ClaudeTelegramBot:
                 selected.append(selected_text)
             data["selected"] = selected
 
-            # Rebuild keyboard with checkmarks
-            buttons = []
-            row = []
-            for i, opt in enumerate(options):
-                label = opt if len(opt) <= 28 else opt[:25] + "..."
-                mark = "✅" if opt in selected else "⬜"
-                row.append(InlineKeyboardButton(
-                    f"{mark} {label}", callback_data=f"askq:{qid}:{i}"
-                ))
-                if len(row) >= 2 or i == len(options) - 1:
-                    buttons.append(row)
-                    row = []
-            buttons.append([InlineKeyboardButton("✏️ Другое", callback_data=f"askq:{qid}:other")])
-            buttons.append([InlineKeyboardButton("✅ Готово", callback_data=f"askq:{qid}:done")])
-
+            # Re-render body (✅/⬜ marks live in the message text — full, untruncated)
+            # and number-keyboard via the shared helper.
+            from .askq_ui import build_ask_text, build_ask_keyboard
             queue_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             await query.answer(f"{'✅' if selected_text in selected else '⬜'} {selected_text}")
             try:
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup(buttons)
+                await query.edit_message_text(
+                    build_ask_text(data["question"], options, selected, True),
+                    reply_markup=build_ask_keyboard(qid, options, selected, True),
                 )
             except Exception:
                 pass
