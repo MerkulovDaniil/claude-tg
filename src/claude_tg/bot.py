@@ -899,16 +899,21 @@ class ClaudeTelegramBot:
                 if prompt.startswith("DIRECT:"):
                     # Send directly to Telegram without running Claude.
                     # Useful for cron jobs, monitoring scripts, heartbeats.
+                    # Honor the ===MSG=== separator here too (the sink), so a
+                    # caller that passes a whole multi-part blob in one DIRECT
+                    # call (e.g. Pulse sending its own voice via curl) gets each
+                    # part as its own message instead of leaking the raw marker.
                     text = prompt[7:].strip()
-                    if text:
+                    parts = [p.strip() for p in text.split("===MSG===") if p.strip()]
+                    for part in parts:
                         try:
                             await self._app.bot.send_message(
                                 chat_id=self.config.chat_id,
-                                text=text,
+                                text=part,
                                 disable_web_page_preview=True,
                             )
-                            self.conversation_log.log_direct(text)
-                            logger.info("Direct message sent: %d chars", len(text))
+                            self.conversation_log.log_direct(part)
+                            logger.info("Direct message sent: %d chars", len(part))
                         except Exception as e:
                             logger.error("Direct send failed: %s", e)
                 else:
