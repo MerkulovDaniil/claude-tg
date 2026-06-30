@@ -68,6 +68,28 @@ async def _find_agent_file(tool_use_id: str) -> str | None:
     return None
 
 
+def _ingest(chunk: str, steps: list[str], prev_final: str) -> str:
+    """Распарсить кусок транскрипта субагента: добавить шаги, вернуть последний
+    осмысленный текст (финальный вывод субагента)."""
+    final = prev_final
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("type") == "assistant":
+            for b in (e.get("message", {}).get("content") or []):
+                if isinstance(b, dict):
+                    if b.get("type") == "tool_use":
+                        steps.append(_step_line(b))
+                    elif b.get("type") == "text" and b.get("text", "").strip():
+                        final = b["text"].strip()
+    return final
+
+
 class SubagentStreamer:
     """Один экземпляр на турн. Стримит субагентов в отдельные сообщения."""
 
@@ -143,26 +165,19 @@ class SubagentStreamer:
                         f.seek(pos)
                         chunk = f.read()
                         pos = f.tell()
-                    for line in chunk.splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            e = json.loads(line)
-                        except Exception:
-                            continue
-                        if e.get("type") == "assistant":
-                            for b in (e.get("message", {}).get("content") or []):
-                                if isinstance(b, dict):
-                                    if b.get("type") == "tool_use":
-                                        steps.append(_step_line(b))
-                                    elif b.get("type") == "text" and b.get("text", "").strip():
-                                        final_text = b["text"].strip()
+                    final_text = _ingest(chunk, steps, final_text)
                     now = time.monotonic()
                     if now - last_edit > _EDIT_EVERY:
                         last_edit = now
                         await self._edit(mid, header, steps, False)
                 await asyncio.sleep(_POLL)
         except asyncio.CancelledError:
+            # дочитать хвост — финальный вывод субагента мог прийти в последний миг
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    f.seek(pos)
+                    final_text = _ingest(f.read(), steps, final_text)
+            except Exception:
+                pass
             await self._edit(mid, header, steps, True, final_text)
             raise
