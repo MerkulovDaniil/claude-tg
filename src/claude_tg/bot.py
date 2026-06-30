@@ -23,6 +23,7 @@ from .runner import ClaudeRunner, EventType
 from .stream import TelegramStream
 from .media import MediaHandler
 from .formatter import format_tool_call, format_tool_result
+from .subagent_stream import SubagentStreamer
 from .conversation_log import ConversationLog
 from .review import ReviewHandler
 
@@ -715,6 +716,7 @@ class ClaudeTelegramBot:
         recent_sigs: list[str] = []
         last_tool_summary = ""
         pulse_count = 0
+        subagents = SubagentStreamer(stream.bot, stream.chat_id)
 
         async def _silence_watchdog():
             nonlocal pulse_count
@@ -746,6 +748,12 @@ class ClaudeTelegramBot:
                     response_text.append(event.text)
                     last_text_time = time.monotonic()
                 elif event.type == EventType.TOOL_USE:
+                    if event.tool_name in ("Agent", "Task"):
+                        _inp = event.tool_input or {}
+                        await subagents.start(event.tool_id, _inp.get("description", ""), _inp.get("subagent_type", ""))
+                        last_tool_name = event.tool_name
+                        tool_count += 1
+                        continue
                     last_tool_name = event.tool_name
                     tool_count += 1
                     try:
@@ -759,9 +767,15 @@ class ClaudeTelegramBot:
                     line = format_tool_call(event.tool_name, event.tool_input)
                     await stream.push_tool_call(line)
                 elif event.type == EventType.TOOL_RESULT:
+                    if event.tool_id and subagents.tracks(event.tool_id):
+                        await subagents.finish(event.tool_id)
+                        last_tool_name = ""
+                        continue
                     if "ask_user_with_buttons" in last_tool_name:
                         # User answered via inline button — start fresh message
                         await stream.start_new_message()
+                    elif last_tool_name in ("Agent", "Task"):
+                        await stream.push_tool_call("✅ Субагент готов")
                     elif self.config.verbose:
                         html = format_tool_result(event.text)
                         await stream.push_tool_result(html)
@@ -778,6 +792,7 @@ class ClaudeTelegramBot:
             self.conversation_log.log_assistant("".join(response_text))
             return False
         finally:
+            await subagents.finish_all()
             watchdog.cancel()
             try:
                 await watchdog

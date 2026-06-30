@@ -26,6 +26,7 @@ class RunnerEvent:
     text: str = ""
     tool_name: str = ""
     tool_input: dict = field(default_factory=dict)
+    tool_id: str = ""
     is_error: bool = False
     session_id: str = ""
     duration_ms: int = 0
@@ -121,6 +122,7 @@ class StreamParser:
                     type=EventType.TOOL_USE,
                     tool_name=block.get("name", ""),
                     tool_input=block.get("input", {}),
+                    tool_id=block.get("id", ""),
                 )
         return None
 
@@ -153,6 +155,7 @@ class StreamParser:
                     type=EventType.TOOL_RESULT,
                     text=raw,
                     is_error=block.get("is_error", False),
+                    tool_id=block.get("tool_use_id", ""),
                 )
         return None
 

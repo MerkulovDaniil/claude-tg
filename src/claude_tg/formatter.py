@@ -95,6 +95,11 @@ def format_tool_call(name: str, input_data: dict) -> str:
         pattern = input_data.get("pattern", "")
         return f"{icon} {name}: {pattern}"
 
+    if name in ("Agent", "Task"):
+        desc = (input_data.get("description") or input_data.get("prompt", ""))[:60]
+        stype = input_data.get("subagent_type", "")
+        return f"🤖 Субагент → {desc}" + (f" [{stype}]" if stype else "")
+
     # Fallback
     return f"{icon} {name}"
 
