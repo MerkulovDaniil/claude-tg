@@ -200,6 +200,23 @@ class ClaudeTelegramBot:
             self._stream = None
         await update.message.reply_text("🛑 Cancelled.")
 
+    async def cmd_sa(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        question = " ".join(context.args).strip()
+        if not question:
+            await update.message.reply_text("Usage: /sa <вопрос> — субагент параллельно текущей работе")
+            return
+        prompt = (
+            "⚡ Параллельная задача через субагента. Запусти ОТДЕЛЬНОГО субагента "
+            "(Task, subagent_type general-purpose) на вопрос ниже — НЕ прерывая и не "
+            "дожидаясь текущей работы, пусть работает параллельно. Когда субагент вернёт — "
+            "пришли результат отдельным сообщением.\n\nВопрос: " + question
+        )
+        self._buffer.append(prompt)
+        await self._schedule_debounce(context)
+        await update.message.reply_text(f"🤖 Субагент запущен параллельно: {question[:60]}")
+
     async def cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
@@ -631,7 +648,15 @@ class ClaudeTelegramBot:
         elif msg.video_note:
             kind = "video_note"
         elif msg.location:
-            kind = "location"
+            loc = msg.location
+            kind = f"location {loc.latitude:.6f},{loc.longitude:.6f}"
+            if getattr(loc, "live_period", None):
+                kind += " (live)"
+            venue = getattr(msg, "venue", None)
+            if venue is not None:
+                vt = " · ".join(x for x in (venue.title, venue.address) if x)
+                if vt:
+                    kind += f" — {vt}"
         elif msg.contact:
             kind = "contact"
         elif msg.story:
@@ -964,6 +989,7 @@ class ClaudeTelegramBot:
                 ("model", "Сменить модель"),
                 ("restart", "Перезапуск"),
                 ("review", "Ревью контента"),
+                ("sa", "Субагент по вопросу (параллельно)"),
             ]
             # Add custom commands
             for name in self._custom_commands:
@@ -985,6 +1011,7 @@ class ClaudeTelegramBot:
         app.add_handler(CommandHandler("model", self.cmd_model))
         app.add_handler(CommandHandler("effort", self.cmd_effort))
         app.add_handler(CommandHandler("restart", self.cmd_restart))
+        app.add_handler(CommandHandler("sa", self.cmd_sa))
 
         # Custom commands (auto-discovered from {work_dir}/commands/)
         for name in self._custom_commands:
