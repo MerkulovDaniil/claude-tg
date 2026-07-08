@@ -30,6 +30,62 @@ from .review import ReviewHandler
 logger = logging.getLogger(__name__)
 
 
+class _LazyStream:
+    """Ленивый прокси TelegramStream для «сиротских» ходов (см. _watch_orphan_turns).
+
+    Реальное TG-сообщение создаётся только когда в ходе появился текст ответа:
+    тихий ход из одних tool-call'ов (pulse/wakeup по правилам молчания) не
+    оставляет в чате ничего. Tool-call'ы до первого текста буферизуются и
+    доигрываются в созданное сообщение, чтобы контекст выглядел как обычно.
+    """
+
+    _TOOL_REPLAY_LIMIT = 15
+
+    def __init__(self, factory, bot, chat_id: int):
+        self._factory = factory
+        self._real: TelegramStream | None = None
+        self._tool_lines: list[str] = []
+        # SubagentStreamer и silence-watchdog в _stream_turn ходят в stream.bot
+        # / stream.chat_id напрямую — им сообщение-плейсхолдер не нужно.
+        self.bot = bot
+        self.chat_id = chat_id
+
+    async def start(self):
+        return None  # создание отложено до первого текста
+
+    async def _materialize(self):
+        if self._real is None:
+            self._real = self._factory()
+            await self._real.start()
+            for line in self._tool_lines[-self._TOOL_REPLAY_LIMIT:]:
+                await self._real.push_tool_call(line)
+            self._tool_lines.clear()
+
+    async def push_text(self, text: str):
+        if self._real is None and not text.strip():
+            return
+        await self._materialize()
+        await self._real.push_text(text)
+
+    async def push_tool_call(self, line: str):
+        if self._real is not None:
+            await self._real.push_tool_call(line)
+        else:
+            self._tool_lines.append(line)
+
+    async def push_tool_result(self, html: str):
+        if self._real is not None:
+            await self._real.push_tool_result(html)
+
+    async def start_new_message(self):
+        if self._real is not None:
+            await self._real.start_new_message()
+
+    async def finalize(self, footer: str = "", cancelled: bool = False):
+        if self._real is not None:
+            await self._real.finalize(footer=footer, cancelled=cancelled)
+
+
 def _format_forward_origin(message) -> str | None:
     """Describe where a forwarded message came from, or None if not forwarded.
 
@@ -86,6 +142,7 @@ class ClaudeTelegramBot:
         self.conversation_log = ConversationLog(config.work_dir)
         self._app: Application | None = None
         self._stream: TelegramStream | None = None
+        self._orphan_watcher: asyncio.Task | None = None
         self._last_activity: float = time.time()
         self._session_cost: float = 0.0
 
@@ -916,6 +973,55 @@ class ClaudeTelegramBot:
                 self._pending_context = None
                 await self._schedule_debounce(ctx)
 
+    # --- Orphan turns (ходы, начатые самим Claude) ---
+
+    async def _watch_orphan_turns(self):
+        """Доставляет в TG ходы, которые Claude начал сам, без сообщения юзера.
+
+        Харнесс будит модель нотификациями о фоновых задачах (workflow/agent
+        завершился, ScheduleWakeup) — такой ход пишет события в stdout, они
+        оседают в очереди раннера, но bot.py их никто не читает: следующий
+        run() молча выбрасывает их через _drain_pending(). Инцидент 08.07.2026:
+        финальный отчёт о собранном плане так и не дошёл до Дани.
+
+        Забираем такие ходы, как только раннер свободен, и стримим через
+        _LazyStream: ход с текстом → обычное сообщение в чат; тихий ход
+        (одни tool-call'ы) → ничего, правила тишины pulse сохраняются.
+        """
+        while True:
+            try:
+                await asyncio.sleep(2)
+                if self.runner.is_processing or not self.runner.process_alive:
+                    continue
+                if not self.runner.has_pending_events():
+                    continue
+                # asyncio однопоточный: между проверкой и установкой флага
+                # нет await, гонки с _process_buffer быть не может.
+                self.runner.is_processing = True
+                logger.info("Orphan turn: streaming pending events to Telegram")
+                ctx = type("_Ctx", (), {"bot": self._app.bot})()
+                stream = _LazyStream(
+                    lambda: self._new_stream(ctx),
+                    bot=self._app.bot,
+                    chat_id=self.config.chat_id,
+                )
+                self._stream = stream
+                try:
+                    got_result = await self._stream_turn(
+                        self.runner.read_pending_turn(), stream
+                    )
+                    if not got_result:
+                        await stream.finalize()
+                finally:
+                    self.runner.is_processing = False
+                    self._stream = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Orphan turn watcher error")
+                self.runner.is_processing = False
+                self._stream = None
+
     # --- Trigger server ---
 
     async def _start_trigger_server(self, port: int):
@@ -1000,6 +1106,7 @@ class ClaudeTelegramBot:
                 await app.bot.send_message(self.config.chat_id, "✅ Restart complete.")
             if trigger_port:
                 await self._start_trigger_server(trigger_port)
+            self._orphan_watcher = asyncio.create_task(self._watch_orphan_turns())
 
         app = Application.builder().token(self.config.bot_token).post_init(_post_init).build()
 

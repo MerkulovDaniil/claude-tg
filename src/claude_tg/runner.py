@@ -451,7 +451,9 @@ class ClaudeRunner:
             except asyncio.QueueEmpty:
                 break
         if drained:
-            logger.debug("Drained %d pending queue items", drained)
+            # Сюда попадать не должны: сиротские ходы забирает _watch_orphan_turns
+            # в bot.py. Если видишь это в логе — события чьего-то хода потеряны.
+            logger.warning("Drained %d pending queue items (потерянный вывод хода?)", drained)
 
     def has_pending_events(self) -> bool:
         """Check if there are pending events in the queue (from mid-turn injections)."""
