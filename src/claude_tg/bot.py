@@ -27,6 +27,9 @@ from .subagent_stream import SubagentStreamer
 from .conversation_log import ConversationLog
 from .review import ReviewHandler
 
+# Живое состояние текущего хода — читают внешние вотчдоги (feanor_alert.sh).
+TURN_STATE_PATH = Path("/run/claude-tg/turn.json")
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,6 +161,11 @@ class ClaudeTelegramBot:
         self._inject_task: asyncio.Task | None = None
         self._pending_injections: int = 0
 
+        # Состояние хода для внешних вотчдогов (см. _write_turn_state)
+        self._turn_started: float = 0.0
+        self._turn_last_event: float = 0.0
+        self._turn_state_written: float = 0.0
+
         # Custom commands from commands/ directory
         self._custom_commands: dict[str, str] = self._discover_custom_commands()
 
@@ -189,6 +197,39 @@ class ClaudeTelegramBot:
 
     def _touch_activity(self):
         self._last_activity = time.time()
+
+    # --- Живое состояние хода для внешних вотчдогов ---
+    # Раньше внешние вотчдоги гадали о состоянии по косвенным признакам —
+    # тишине в journalctl всего юнита и по CPU процесса. Оба признака врут
+    # в разные стороны: молчащая простаивающая сессия (Даня отошёл и не
+    # отвечает) выглядела «зависшей» и убивалась, а реально зависший ход
+    # спасался от смерти строчкой в логе от соседнего хода. Здесь бот пишет
+    # то, что знает точно: идёт ли сейчас ход и когда от него было последнее
+    # событие. Вотчдогу больше не надо угадывать.
+    def _write_turn_state(self, force: bool = False):
+        now = time.time()
+        if not force and now - self._turn_state_written < 5:
+            return
+        self._turn_state_written = now
+        try:
+            pid = self.runner.process.pid if self.runner.process_alive else None
+            TURN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = TURN_STATE_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps({
+                "pid": pid,
+                "is_processing": bool(self.runner.is_processing),
+                "turn_started": self._turn_started,
+                "last_event": self._turn_last_event,
+                "written": now,
+            }), encoding="utf-8")
+            tmp.replace(TURN_STATE_PATH)
+        except Exception as e:
+            logger.debug("turn state write failed: %s", e)
+
+    def _mark_turn_event(self):
+        """Ход подал признак жизни (текст, вызов инструмента, результат)."""
+        self._turn_last_event = time.time()
+        self._write_turn_state()
 
     def _get_unseen_bus_messages(self) -> str:
         """Read the message bus for anything Claude hasn't seen.
@@ -825,6 +866,7 @@ class ClaudeTelegramBot:
         watchdog = asyncio.create_task(_silence_watchdog())
         try:
             async for event in events:
+                self._mark_turn_event()
                 if event.type == EventType.TEXT_DELTA:
                     await stream.push_text(event.text)
                     response_text.append(event.text)
@@ -913,6 +955,9 @@ class ClaudeTelegramBot:
         # Re-assert: _check_session_timeout may call stop() which clears the flag
         self.runner.is_processing = True
         self._touch_activity()
+        self._turn_started = time.time()
+        self._turn_last_event = self._turn_started
+        self._write_turn_state(force=True)
 
         # Sync from message bus: inject messages Claude hasn't seen
         bus_context = self._get_unseen_bus_messages()
@@ -966,6 +1011,7 @@ class ClaudeTelegramBot:
                 )
         finally:
             self.runner.is_processing = False
+            self._write_turn_state(force=True)
             self._stream = None
             # Process messages that arrived but weren't injected
             if self._buffer or self._buffer_photos or self._buffer_docs:
@@ -998,6 +1044,9 @@ class ClaudeTelegramBot:
                 # asyncio однопоточный: между проверкой и установкой флага
                 # нет await, гонки с _process_buffer быть не может.
                 self.runner.is_processing = True
+                self._turn_started = time.time()
+                self._turn_last_event = self._turn_started
+                self._write_turn_state(force=True)
                 logger.info("Orphan turn: streaming pending events to Telegram")
                 ctx = type("_Ctx", (), {"bot": self._app.bot})()
                 stream = _LazyStream(
@@ -1014,12 +1063,14 @@ class ClaudeTelegramBot:
                         await stream.finalize()
                 finally:
                     self.runner.is_processing = False
+                    self._write_turn_state(force=True)
                     self._stream = None
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Orphan turn watcher error")
                 self.runner.is_processing = False
+                self._write_turn_state(force=True)
                 self._stream = None
 
     # --- Trigger server ---
