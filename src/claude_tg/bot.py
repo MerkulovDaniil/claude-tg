@@ -1082,7 +1082,22 @@ class ClaudeTelegramBot:
             data = await reader.read(65536)
             # Support both raw body and HTTP POST
             if b"\r\n\r\n" in data:
-                body = data.split(b"\r\n\r\n", 1)[1]
+                head, body = data.split(b"\r\n\r\n", 1)
+                # urllib sends headers and body as separate writes; a single
+                # read() then sees an empty body and the trigger is dropped as
+                # 400 (2026-10-30: the daily coach prompt was lost this way).
+                length = 0
+                for line in head.split(b"\r\n")[1:]:
+                    name, _, value = line.partition(b":")
+                    if name.strip().lower() == b"content-length":
+                        length = int(value.strip() or 0)
+                if len(body) < length:
+                    try:
+                        body += await asyncio.wait_for(
+                            reader.readexactly(length - len(body)), timeout=10
+                        )
+                    except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
+                        body += getattr(e, "partial", b"")
             else:
                 body = data
             prompt = body.decode(errors="replace").strip()
