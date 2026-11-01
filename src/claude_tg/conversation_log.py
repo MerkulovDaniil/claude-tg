@@ -46,12 +46,18 @@ class ConversationLog:
         if text.strip():
             self._write({"role": "assistant", "text": text})
 
-    def log_trigger(self, text: str, source: str = ""):
+    def log_trigger(self, text: str, source: str = "", trigger_id: str = ""):
         """Trigger prompt (heartbeat, worker, morning, evening, etc)."""
         entry = {"role": "trigger", "text": text}
         if source:
             entry["source"] = source
+        if trigger_id:
+            entry["trigger_id"] = trigger_id
         self._write(entry)
+
+    def log_receipt(self, trigger_ids: list[str], ok: bool, reply: str):
+        """Processing that consumed these triggers has ended (not shown in TG)."""
+        self._write({"role": "receipt", "triggers": trigger_ids, "ok": ok, "reply": reply})
 
     def log_direct(self, text: str, source: str = ""):
         """DIRECT message (sent to TG without Claude processing)."""
@@ -109,8 +115,8 @@ class ConversationLog:
         lines = []
         for e in entries:
             role = e.get("role", "?")
-            if role == "upload":
-                continue  # служебная запись file_id, не для контекста
+            if role in ("upload", "receipt"):
+                continue  # служебные записи (file_id, итог хода), не для контекста
             text = e.get("text", "")
             ts = e.get("ts", "")
             time_str = ""

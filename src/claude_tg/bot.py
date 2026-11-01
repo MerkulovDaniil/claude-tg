@@ -1,5 +1,6 @@
 """Telegram bot setup, handlers, and session management."""
 import json
+import uuid
 import os
 import sys
 import time
@@ -153,6 +154,14 @@ class ClaudeTelegramBot:
         self._buffer: list[str] = []
         self._buffer_photos: list[str] = []
         self._buffer_docs: list[str] = []
+        # Trigger ids travel with the buffer into a turn; when that processing
+        # finishes the bot writes a receipt (see _write_receipt). Callers that
+        # need to know whether their trigger was handled read the receipt,
+        # not the reply text (2026-11-01: the coach watchdog guessed delivery
+        # by an emoji at the start of the reply and raised a false alarm).
+        self._buffer_triggers: list[str] = []
+        self._turn_triggers: list[str] = []
+        self._turn_replies: list[str] = []
         self._debounce_task: asyncio.Task | None = None
         self._debounce_timeout = 0.5
         self._pending_context: ContextTypes.DEFAULT_TYPE | None = None
@@ -225,6 +234,19 @@ class ClaudeTelegramBot:
             tmp.replace(TURN_STATE_PATH)
         except Exception as e:
             logger.debug("turn state write failed: %s", e)
+
+    def _write_receipt(self, ok: bool):
+        """Record which triggers this processing consumed and how it ended.
+
+        ok=False: the turn died or was cancelled before a result. replied:
+        the turn showed text in Telegram. Written once per processing, after
+        mid-turn injections are drained, so an injected trigger is covered.
+        """
+        if not self._turn_triggers:
+            return
+        reply = "\n\n".join(r for r in self._turn_replies if r.strip())
+        self.conversation_log.log_receipt(list(self._turn_triggers), ok=ok, reply=reply)
+        self._turn_triggers.clear()
 
     def _mark_turn_event(self):
         """Ход подал признак жизни (текст, вызов инструмента, результат)."""
@@ -811,6 +833,8 @@ class ClaudeTelegramBot:
         self._buffer.clear()
         self._buffer_photos.clear()
         self._buffer_docs.clear()
+        triggers = list(self._buffer_triggers)
+        self._buffer_triggers.clear()
 
         if not text and not photos and not docs:
             return
@@ -822,8 +846,10 @@ class ClaudeTelegramBot:
         try:
             await self.runner.inject(prompt)
             self._pending_injections += 1
+            self._turn_triggers.extend(triggers)
         except RuntimeError:
             # Process died — re-buffer for normal flow
+            self._buffer_triggers.extend(triggers)
             if text:
                 self._buffer.append(text)
             self._buffer_photos.extend(photos)
@@ -911,9 +937,11 @@ class ClaudeTelegramBot:
                     footer = f"⏱ {duration}s · {event.num_turns} turns{ctx_str}"
                     await stream.finalize(footer=footer)
                     self.conversation_log.log_assistant("".join(response_text))
+                    self._turn_replies.append("".join(response_text))
                     return True
             # EOF without RESULT — process died
             self.conversation_log.log_assistant("".join(response_text))
+            self._turn_replies.append("".join(response_text))
             return False
         finally:
             await subagents.finish_all()
@@ -942,6 +970,8 @@ class ClaudeTelegramBot:
         self._buffer.clear()
         self._buffer_photos.clear()
         self._buffer_docs.clear()
+        self._turn_triggers.extend(self._buffer_triggers)
+        self._buffer_triggers.clear()
 
         if not text and not photos and not docs:
             return
@@ -971,6 +1001,8 @@ class ClaudeTelegramBot:
         stream = self._new_stream(context)
         self._stream = stream
         await stream.start()
+        self._turn_replies = []
+        got_result = False
 
         try:
             got_result = await self._stream_turn(self.runner.run(prompt), stream)
@@ -1010,6 +1042,7 @@ class ClaudeTelegramBot:
                     self.config.chat_id, f"❌ Error: {str(e)[:4000]}"
                 )
         finally:
+            self._write_receipt(ok=got_result)
             self.runner.is_processing = False
             self._write_turn_state(force=True)
             self._stream = None
@@ -1104,7 +1137,11 @@ class ClaudeTelegramBot:
 
             if prompt:
                 logger.info("Trigger: %d chars", len(prompt))
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                trigger_id = uuid.uuid4().hex[:12]
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nX-Trigger-Id: " + trigger_id.encode()
+                    + b"\r\nContent-Length: 2\r\n\r\nok"
+                )
                 await writer.drain()
                 writer.close()
 
@@ -1130,11 +1167,12 @@ class ClaudeTelegramBot:
                             logger.error("Direct send failed: %s", e)
                 else:
                     # Log trigger prompt
-                    self.conversation_log.log_trigger(prompt)
+                    self.conversation_log.log_trigger(prompt, trigger_id=trigger_id)
 
                     # Inject into the normal message pipeline
                     ctx = type("_Ctx", (), {"bot": self._app.bot})()
                     self._buffer.append(prompt)
+                    self._buffer_triggers.append(trigger_id)
                     await self._schedule_debounce(ctx)
             else:
                 writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nempty")
