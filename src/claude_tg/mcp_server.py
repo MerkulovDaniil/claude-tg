@@ -88,9 +88,27 @@ def _chunk_text(text: str, size: int = 4000) -> list[str]:
     return chunks
 
 
+async def _send_rich(bot, chat_id: int, markdown: str) -> bool:
+    """sendRichMessage (Bot API 10.3): GFM rendered natively — tables, LaTeX,
+    task lists, <details>, <tg-button>. False → caller falls back to plain text.
+    CLAUDE_TG_RICH=0 turns it off."""
+    if os.environ.get("CLAUDE_TG_RICH", "1") == "0":
+        return False
+    try:
+        await bot.do_api_request("sendRichMessage", api_kwargs={
+            "chat_id": chat_id, "rich_message": {"markdown": markdown}})
+        return True
+    except Exception:
+        return False
+
+
 @mcp.tool()
 async def send_telegram_message(text: str, disable_preview: bool = True) -> str:
-    """Send a plain-text message to the user via Telegram (proactive push).
+    """Send a message to the user via Telegram (proactive push).
+
+    Text is GitHub-flavoured Markdown, rendered natively as a Telegram rich
+    message: headings, tables, $LaTeX$, task lists, <details>, <tg-button>
+    (see skill tg-rich). Falls back to plain text if Telegram rejects it.
 
     Use this to message the user from within a turn or after long background
     work finishes (e.g. "collection done") — instead of the curl DIRECT hack.
@@ -111,6 +129,8 @@ async def send_telegram_message(text: str, disable_preview: bool = True) -> str:
     bot = Bot(token=token)
     async with bot:
         for part in parts:
+            if await _send_rich(bot, int(chat_id), part):
+                continue
             await bot.send_message(
                 chat_id=int(chat_id),
                 text=part,
@@ -124,6 +144,55 @@ async def send_telegram_message(text: str, disable_preview: bool = True) -> str:
         pass
 
     return f"Message sent to Telegram ({len(text)} chars, {len(parts)} part(s))"
+
+
+@mcp.tool()
+async def send_telegram_widget(html_path: str, caption: str = "", height: int = 0,
+                               chat_data: str = "", public_data: str = "") -> str:
+    """Send an interactive HTML widget (Bot API 10.4 sendWidget) into the chat.
+
+    html_path: file with the widget HTML (<=32 KB, <=4096 B zlib-compressed;
+    no network, QuickJS sandbox, theme via --tg-theme-* CSS vars — see skill
+    tg-widget). caption: plain-text summary shown under it — put the key
+    numbers there too, apps without widgets show only the caption.
+    height: fixed height in px (50-600), 0 = auto.
+    """
+    import zlib
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return "Error: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set"
+    path = Path(html_path)
+    if not path.is_file():
+        return f"Error: File not found: {html_path}"
+    html = path.read_text()
+    raw, packed = len(html.encode()), len(zlib.compress(html.encode(), 9))
+    if raw > 32768 or packed > 4096:
+        return f"Error: widget too large ({raw} B raw / {packed} B zlib; limits 32768 / 4096)"
+    body = {"chat_id": int(chat_id), "html": html}
+    for k, v in (("caption", caption), ("chat_data", chat_data), ("public_data", public_data)):
+        if v:
+            body[k] = v
+    if height:
+        body["height"] = height
+
+    from telegram import Bot
+    bot = Bot(token=token)
+    try:
+        async with bot:
+            await bot.do_api_request("sendWidget", api_kwargs=body)
+    except Exception as e:
+        msg = str(e)
+        if "widget_not_allowed" in msg.lower():
+            return ("Error: Telegram refuses widgets for this bot (INPUT_MEDIA_WIDGET_NOT_ALLOWED — "
+                    "production rollout hasn't reached it). Send the same content as a rich message instead.")
+        return f"Error: sendWidget failed: {msg}"
+    try:
+        work_dir = os.environ.get("CLAUDE_WORK_DIR", os.getcwd())
+        ConversationLog(work_dir).log_direct(f"[widget] {caption}")
+    except Exception:
+        pass
+    return f"Widget sent ({raw} B, {packed} B compressed)"
 
 
 @mcp.tool()

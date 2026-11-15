@@ -1,4 +1,5 @@
 """Telegram message streaming with rate limiting and message chaining."""
+import os
 import time
 import asyncio
 import logging
@@ -9,6 +10,12 @@ from telegram.error import BadRequest
 from .formatter import md_to_html
 
 logger = logging.getLogger(__name__)
+
+# Rich Messages (Bot API 10.3): Telegram renders GFM markdown natively — tables,
+# headings, LaTeX, task lists, <details>. Claude already writes GFM, so we hand it
+# over as is instead of squeezing it into the old HTML subset. PTB 22.x doesn't
+# know rich_message, hence the raw request. CLAUDE_TG_RICH=0 turns it off.
+RICH_ENABLED = os.environ.get("CLAUDE_TG_RICH", "1") != "0"
 
 
 class MessageChain:
@@ -189,7 +196,26 @@ class TelegramStream:
                 except Exception:
                     pass
 
+    async def _edit_rich(self, msg: Message, text: str, reply_markup: InlineKeyboardMarkup | None) -> bool:
+        """Edit as a rich message. True = done (or nothing changed), False = use the HTML path."""
+        kwargs = {"chat_id": self.chat_id, "message_id": msg.message_id,
+                  "rich_message": {"markdown": text}}
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup.to_dict()
+        try:
+            await self.bot.do_api_request("editMessageText", api_kwargs=kwargs)
+            return True
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return True
+            logger.warning(f"Rich edit failed, falling back to HTML: {e} (text length: {len(text)})")
+        except Exception as e:
+            logger.warning(f"Rich edit error, falling back to HTML: {e}")
+        return False
+
     async def _edit_message(self, msg: Message, text: str, reply_markup: InlineKeyboardMarkup | None):
+        if RICH_ENABLED and await self._edit_rich(msg, text, reply_markup):
+            return
         try:
             html_text = md_to_html(text)
             await msg.edit_text(html_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
