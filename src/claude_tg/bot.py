@@ -189,8 +189,13 @@ class ClaudeTelegramBot:
     def _is_authorized(self, update: Update) -> bool:
         return update.effective_chat and update.effective_chat.id == self.config.chat_id
 
-    async def _check_session_timeout(self):
-        """Auto-reset session if inactive too long."""
+    async def _check_session_timeout(self, keep: list[str] | None = None):
+        """Auto-reset session if inactive too long.
+
+        `keep` — files of the turn being started. _process_buffer clears the
+        buffer before calling this, so without `keep` the photo that triggered
+        the turn was deleted right before Claude read it (15.11.2026).
+        """
         if (
             self.runner.session_id
             and time.time() - self._last_activity > self.config.session_timeout
@@ -200,7 +205,9 @@ class ClaudeTelegramBot:
             self.runner.clear_session()
             # Keep files that just arrived for the upcoming turn — wiping them
             # before the new session reads them is the file-loss bug.
-            self.media.cleanup(keep=self._buffer_photos + self._buffer_docs)
+            self.media.cleanup(
+                keep=self._buffer_photos + self._buffer_docs + list(keep or [])
+            )
             self._session_cost = 0.0
             self._pending_injections = 0
 
@@ -981,7 +988,7 @@ class ClaudeTelegramBot:
         # instead of spawning a concurrent _process_buffer()
         self.runner.is_processing = True
 
-        await self._check_session_timeout()
+        await self._check_session_timeout(keep=photos + docs)
         # Re-assert: _check_session_timeout may call stop() which clears the flag
         self.runner.is_processing = True
         self._touch_activity()
