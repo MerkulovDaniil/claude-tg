@@ -15,6 +15,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    TypeHandler,
     ContextTypes,
     filters,
 )
@@ -88,6 +89,9 @@ class _LazyStream:
     async def finalize(self, footer: str = "", cancelled: bool = False):
         if self._real is not None:
             await self._real.finalize(footer=footer, cancelled=cancelled)
+
+    def owns_draft(self, draft_id) -> bool:
+        return self._real is not None and self._real.owns_draft(draft_id)
 
 
 def _format_forward_origin(message) -> str | None:
@@ -513,6 +517,30 @@ class ClaudeTelegramBot:
             if self._stream:
                 await self._stream.finalize(cancelled=True)
                 self._stream = None
+
+    async def handle_stop_generation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Native stop button on a streamed draft (Bot API 10.4).
+
+        PTB 22.x doesn't know `stopped_message_generation`, so it arrives in
+        update.api_kwargs. Only the drafts of the running turn can cancel it —
+        a stale draft from a finished turn must not kill the next one.
+        """
+        data = (update.api_kwargs or {}).get("stopped_message_generation")
+        if not data:
+            return
+        if (data.get("chat") or {}).get("id") != self.config.chat_id:
+            return
+        stream = self._stream
+        if not self.runner.is_processing or stream is None:
+            return
+        if not getattr(stream, "owns_draft", lambda _d: False)(data.get("draft_id")):
+            logger.info("Stop for a stale draft %s — ignored", data.get("draft_id"))
+            return
+        logger.info("Stop pressed on draft %s — cancelling turn", data.get("draft_id"))
+        await self.runner.cancel()
+        if self._stream:
+            await self._stream.finalize(cancelled=True)
+            self._stream = None
 
     # --- Ask with buttons callback ---
 
@@ -1256,6 +1284,8 @@ class ClaudeTelegramBot:
         app.add_handler(
             CallbackQueryHandler(self.handle_cancel_callback, pattern="^claude_cancel$")
         )
+        # Stop button on a native draft — unknown to PTB, comes in api_kwargs
+        app.add_handler(TypeHandler(Update, self.handle_stop_generation), group=1)
 
         # Messages (order matters: specific types before catch-all text)
         app.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
@@ -1290,4 +1320,4 @@ class ClaudeTelegramBot:
 
         logger.info(f"Starting claude-tg, work_dir={self.config.work_dir}")
         app = self.build_app()
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        app.run_polling(allowed_updates=[*Update.ALL_TYPES, "stopped_message_generation"])
