@@ -38,6 +38,10 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         level=getattr(logging, log_level, logging.INFO),
     )
+    # httpx logs every Bot API request at INFO with the full URL, which
+    # contains the bot token (~80% of journal volume). Keep only warnings.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     config = Config()
     errors = config.validate()
