@@ -435,6 +435,7 @@ class ClaudeTelegramBot:
         cmd = update.message.text.split()[0].lstrip("/")
         args = update.message.text.split()[1:]
         script = self._custom_commands.get(cmd)
+        logger.info("Custom command /%s -> %s", cmd, script)
         if not script:
             return
 
@@ -465,6 +466,11 @@ class ClaudeTelegramBot:
                 text_lines.append(line)
 
         text = "\n".join(text_lines).strip()
+        logger.info("Custom command /%s rc=%s out=%d err=%d", cmd, proc.returncode, len(text), len(stderr))
+        if not text and not photos:
+            # Пустой вывод раньше уходил в тишину: Даня видел «ничего не пришло».
+            err = stderr.decode(errors="replace").strip()[-800:]
+            text = f"⚠️ /{cmd}: пустой вывод (rc={proc.returncode})" + (f"\n{err}" if err else "")
         if text:
             # Split into 4096-char chunks for Telegram limit
             for i in range(0, len(text), 4096):
