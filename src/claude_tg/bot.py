@@ -509,6 +509,19 @@ class ClaudeTelegramBot:
         await query.answer()
         if query.from_user.id != self.config.chat_id:
             return
+        if query.data.startswith("claude_cancel:"):
+            # Кнопка из черновика (stream._stop_row): отменяет только свой ход.
+            draft_id = int(query.data.split(":", 1)[1])
+            stream = self._stream
+            if not self.runner.is_processing or not getattr(stream, "owns_draft", lambda _d: False)(draft_id):
+                logger.info("Draft stop for a stale draft %s — ignored", draft_id)
+                return
+            logger.info("Draft stop pressed on %s — cancelling turn", draft_id)
+            await self.runner.cancel()
+            if self._stream:
+                await self._stream.finalize(cancelled=True)
+                self._stream = None
+            return
         if query.data == "claude_cancel":
             if not self.runner.is_processing:
                 await query.edit_message_text("Nothing running.")
@@ -1282,7 +1295,7 @@ class ClaudeTelegramBot:
             CallbackQueryHandler(self._handle_asking_callback, pattern=r"^askq:")
         )
         app.add_handler(
-            CallbackQueryHandler(self.handle_cancel_callback, pattern="^claude_cancel$")
+            CallbackQueryHandler(self.handle_cancel_callback, pattern=r"^claude_cancel(:\d+)?$")
         )
         # Stop button on a native draft — unknown to PTB, comes in api_kwargs
         app.add_handler(TypeHandler(Update, self.handle_stop_generation), group=1)

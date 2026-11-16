@@ -112,7 +112,7 @@ class TelegramStream:
     async def start(self) -> Message | None:
         if self.draft_mode:
             self._new_draft()
-            if await self._send_draft(THINKING_TAG):
+            if await self._send_draft(self._draft_view()):
                 self._keepalive_task = asyncio.create_task(self._keepalive())
                 return None
             self.draft_mode = False
@@ -144,7 +144,16 @@ class TelegramStream:
 
     def _draft_view(self) -> str:
         display = self.chain.render().rstrip()
-        return f"{display}\n\n{THINKING_TAG}" if display else THINKING_TAG
+        body = f"{display}\n\n{THINKING_TAG}" if display else THINKING_TAG
+        return f"{body}\n\n{self._stop_row()}"
+
+    def _stop_row(self) -> str:
+        # Своя кнопка «стоп» в черновике: нативную (can_stop, Bot API 10.4 от
+        # 09.11.2026) клиенты Дани 16.11 не показывали — он остался без отмены.
+        # draft_id в data: нажатие на чужой/старый черновик не убьёт новый ход.
+        return ('<tg-button-row align="right"><tg-button type="callback_data" '
+                f'style="danger" data="claude_cancel:{self.draft_id}">🛑 Стоп</tg-button>'
+                '</tg-button-row>')
 
     async def _push_draft(self):
         """Show the current buffer as a draft; on failure switch to the edit path."""
